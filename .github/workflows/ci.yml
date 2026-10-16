@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev, 'feature/**', 'hotfix/**' ]
+    branches: [ main, 'feature/**', 'hotfix/**' ]
   pull_request:
-    branches: [ main, dev ]
+    branches: [ main ]
 
 # Cancel in-progress runs for the same branch on new push.
 concurrency:
@@ -14,12 +14,12 @@ concurrency:
 jobs:
   # -------------------------------------------------------
   # Open feature PR — runs on every push to a feature or
-  # hotfix branch. Creates a PR targeting dev if none exists.
+  # hotfix branch. Creates a PR targeting main if none exists.
   # The PR then triggers the pull_request CI run, which runs
   # coverage-gate and auto-merge once all checks pass.
   # -------------------------------------------------------
   create-feature-pr:
-    name: Open Feature PR (→ dev)
+    name: Open Feature PR (→ main)
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'push' &&
@@ -31,22 +31,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create PR to dev if none exists
+      - name: Create PR to main if none exists
         run: |
           BRANCH="${{ github.ref_name }}"
           EXISTING=$(gh pr list \
-            --base dev --head "$BRANCH" \
+            --base main --head "$BRANCH" \
             --state open --json number \
             --jq '.[0].number // empty')
 
           if [ -z "$EXISTING" ]; then
             TITLE=$(echo "$BRANCH" | sed 's|feature/||;s|hotfix/||;s|-| |g')
             gh pr create \
-              --base dev \
+              --base main \
               --head "$BRANCH" \
               --title "$TITLE" \
-              --body "Automated PR — all CI checks must pass to auto-merge into dev."
-            echo "PR created: ${BRANCH} → dev"
+              --body "Automated PR — all CI checks must pass to auto-merge into main."
+            echo "PR created: ${BRANCH} → main"
           else
             echo "PR #${EXISTING} already open — skipping."
           fi
@@ -62,8 +62,7 @@ jobs:
     runs-on: macos-latest
     if: >
       github.event_name == 'pull_request' ||
-      github.ref == 'refs/heads/main' ||
-      github.ref == 'refs/heads/dev'
+      github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
@@ -187,8 +186,9 @@ jobs:
             -object build/test_crypto \
             -object build/test_protocol \
             -object build/test_replay \
+            -object build/test_server \
             -instr-profile=coverage.profdata \
-            common/identity.cpp common/crypto.cpp common/replay.hpp \
+            common/identity.cpp common/crypto.cpp common/replay.hpp server/server.cpp \
             | grep TOTAL | awk '{print $10}' | tr -d '%')
 
           echo "Line coverage: ${LINE_COV}%"
@@ -209,8 +209,9 @@ jobs:
               -object build/test_crypto \
               -object build/test_protocol \
               -object build/test_replay \
+              -object build/test_server \
               -instr-profile=coverage.profdata \
-              common/identity.cpp common/crypto.cpp common/replay.hpp
+              common/identity.cpp common/crypto.cpp common/replay.hpp server/server.cpp
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -229,16 +230,16 @@ jobs:
           retention-days: 1
 
   # -------------------------------------------------------
-  # Coverage gate — runs only on PRs targeting dev.
+  # Coverage gate — runs only on PRs targeting main.
   # Downloads the number saved by the coverage job and
-  # compares it against the last known dev baseline.
+  # compares it against the last known main baseline.
   # Fails if this PR would regress coverage.
   # -------------------------------------------------------
   coverage-gate:
-    name: Coverage Gate (vs dev baseline)
+    name: Coverage Gate (vs main baseline)
     runs-on: ubuntu-latest
     needs: coverage
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
 
     steps:
       - uses: actions/checkout@v4
@@ -250,16 +251,16 @@ jobs:
         with:
           name: coverage-number
 
-      - name: Compare against dev baseline
+      - name: Compare against main baseline
         run: |
           LINE_COV=$(cat coverage-number.txt)
 
-          # Read baseline from the coverage-data branch (created by update-baseline on dev push)
+          # Read baseline from the coverage-data branch (created by update-baseline on main push)
           git fetch origin coverage-data --depth=1 2>/dev/null || true
-          BASELINE=$(git show origin/coverage-data:dev-coverage.txt 2>/dev/null \
+          BASELINE=$(git show origin/coverage-data:main-coverage.txt 2>/dev/null \
                      | tr -d '[:space:]' || echo "")
 
-          echo "Dev baseline : ${BASELINE:-not set yet}%"
+          echo "Main baseline: ${BASELINE:-not set yet}%"
           echo "This PR      : ${LINE_COV}%"
 
           if [ -z "$BASELINE" ] || [ "$BASELINE" = "0" ]; then
@@ -268,27 +269,26 @@ jobs:
           fi
 
           if [ "$(echo "$LINE_COV < $BASELINE" | bc -l)" -eq 1 ]; then
-            echo "❌ Coverage regression: ${LINE_COV}% is below dev baseline ${BASELINE}%"
+            echo "❌ Coverage regression: ${LINE_COV}% is below main baseline ${BASELINE}%"
             exit 1
           fi
 
           echo "✅ Coverage OK: ${LINE_COV}% >= ${BASELINE}%"
 
   # -------------------------------------------------------
-  # Auto merge — runs on PRs targeting dev after all gates
+  # Auto merge — runs on PRs targeting main after all gates
   # pass. Merges immediately (not --auto) so that the
-  # update-baseline and create-release-pr jobs can chain
-  # off it in the same CI run.
+  # update-baseline job can chain off it in the same CI run.
   #
   # Note: GITHUB_TOKEN merges don't trigger new workflow
   # runs (GitHub blocks recursive loops), so downstream
-  # jobs must run here rather than on a push-to-dev event.
+  # jobs must run here rather than on a push-to-main event.
   # -------------------------------------------------------
   auto-merge:
-    name: Auto Merge to Dev
+    name: Auto Merge to Main
     runs-on: ubuntu-latest
     needs: [ test, sanitize, lint, coverage-gate ]
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     permissions:
       pull-requests: write
       contents: write
@@ -310,7 +310,7 @@ jobs:
     name: Update Coverage Baseline
     runs-on: ubuntu-latest
     needs: [ auto-merge, coverage ]
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
     permissions:
       contents: write
 
@@ -339,8 +339,8 @@ jobs:
             git clean -fd --quiet 2>/dev/null || true
           fi
 
-          printf '%s\n' "$LINE_COV" > dev-coverage.txt
-          git add dev-coverage.txt
+          printf '%s\n' "$LINE_COV" > main-coverage.txt
+          git add main-coverage.txt
 
           if ! git diff --cached --quiet; then
             git commit -m "chore: update coverage baseline to ${LINE_COV}%"
@@ -350,38 +350,3 @@ jobs:
             echo "Baseline unchanged (${LINE_COV}%) — nothing to push."
           fi
 
-  # -------------------------------------------------------
-  # Create release PR — chains off auto-merge in the same
-  # run. Opens dev → main PR for the owner to review.
-  # Skips silently if one is already open.
-  # -------------------------------------------------------
-  create-release-pr:
-    name: Open Release PR (dev → main)
-    runs-on: ubuntu-latest
-    needs: auto-merge
-    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
-    permissions:
-      pull-requests: write
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Create PR if none exists
-        run: |
-          EXISTING=$(gh pr list \
-            --base main --head dev \
-            --state open --json number \
-            --jq '.[0].number // empty')
-
-          if [ -z "$EXISTING" ]; then
-            gh pr create \
-              --base main \
-              --head dev \
-              --title "Release: dev → main" \
-              --body "All CI checks passed on dev. Review and approve to release to main."
-            echo "PR created."
-          else
-            echo "PR #${EXISTING} already open — no action needed."
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
