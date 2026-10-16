@@ -1,4 +1,5 @@
 #include "identity.hpp"
+#include "secure_memory.hpp"
 #include <botan/aead.h>
 #include <botan/hash.h>
 #include <botan/hex.h>
@@ -27,7 +28,7 @@ Identity generate_identity(Botan::AutoSeeded_RNG& rng)
 }
 
 // derive AES-256 key from passphrase + salt using PBKDF2
-static Botan::secure_vector<uint8_t> kdf_from_passphrase(const std::string& passphrase,
+static Botan::secure_vector<uint8_t> kdf_from_passphrase(const SecureString& passphrase,
                                                          std::span<const uint8_t> salt)
 {
     auto pbkdf = Botan::PasswordHashFamily::create_or_throw("PBKDF2(SHA-256)");
@@ -38,7 +39,7 @@ static Botan::secure_vector<uint8_t> kdf_from_passphrase(const std::string& pass
     return key;
 }
 
-void save_identity(const Identity& id, const std::string& passphrase, const std::string& path,
+void save_identity(const Identity& id, const SecureString& passphrase, const std::string& path,
                    Botan::AutoSeeded_RNG& rng)
 {
     // rng.random_vec returns secure_vector — wiped on destruction
@@ -63,7 +64,7 @@ void save_identity(const Identity& id, const std::string& passphrase, const std:
     out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
 }
 
-Identity load_identity(const std::string& passphrase, const std::string& path)
+Identity load_identity(const SecureString& passphrase, const std::string& path)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in)

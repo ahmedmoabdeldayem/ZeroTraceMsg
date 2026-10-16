@@ -60,6 +60,10 @@ jobs:
   build:
     name: Build
     runs-on: macos-latest
+    if: >
+      github.event_name == 'pull_request' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/dev'
 
     steps:
       - uses: actions/checkout@v4

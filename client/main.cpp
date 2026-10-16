@@ -6,6 +6,7 @@
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
 #include "../common/replay.hpp"
+#include "../common/secure_memory.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <botan/auto_rng.h>
@@ -358,19 +359,20 @@ static void display_thread()
 // -------------------------------------------------------
 // Read passphrase without echo
 // -------------------------------------------------------
-static std::string read_passphrase(const std::string& prompt)
+static SecureString read_passphrase(const std::string& prompt)
 {
     std::cout << prompt << std::flush;
-    // disable echo
-    std::string pass;
+    std::string tmp;
     struct termios oldt, newt;
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~ECHO;
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
-    std::getline(std::cin, pass);
+    std::getline(std::cin, tmp);
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     std::cout << "\n";
+    SecureString pass = make_secure(tmp);
+    std::fill(tmp.begin(), tmp.end(), '\0'); // zero the temporary before it leaves scope
     return pass;
 }
 
@@ -408,7 +410,6 @@ int main(int argc, char* argv[])
         auto pass = read_passphrase("Passphrase: ");
         try {
             identity = load_identity(pass, identity_file);
-            std::fill(pass.begin(), pass.end(), '\0');
         } catch (...) {
             std::cerr << "Wrong passphrase or corrupt identity file.\n";
             return 1;
@@ -420,7 +421,6 @@ int main(int argc, char* argv[])
         identity = generate_identity(rng);
         save_identity(identity, pass, identity_file, rng);
         chmod(identity_file.c_str(), 0600); // owner-read only
-        std::fill(pass.begin(), pass.end(), '\0');
         std::cout << "Identity saved to " << identity_file << "\n";
     }
 
