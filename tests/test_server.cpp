@@ -1,11 +1,11 @@
 // Tests for the server protocol — REGISTER, GETKEY, SEND, POLL
 // Starts a real server thread on TEST_PORT and connects via TCP.
 
-#include "test_runner.hpp"
 #include "../common/crypto.hpp"
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
 #include "../server/server.hpp"
+#include "test_runner.hpp"
 #include <arpa/inet.h>
 #include <botan/auto_rng.h>
 #include <botan/hex.h>
@@ -60,7 +60,7 @@ static std::string cmd(int fd, const std::string& line)
 
 // Read all MSG lines from a POLL response, return the blobs; stops at NOMSG.
 static std::vector<std::vector<uint8_t>> poll_all(int fd, const std::string& user_id,
-                                                   const std::string& token)
+                                                  const std::string& token)
 {
     send_line(fd, "POLL " + user_id + " " + token);
     std::vector<std::vector<uint8_t>> blobs;
@@ -209,6 +209,40 @@ int main()
         close(fd);
     }
 
+    TEST("SEND rejects blob exceeding MAX_BLOB_LEN");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        std::vector<uint8_t> oversized(MAX_BLOB_LEN + 1, 0xAB);
+        std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
+                                       recipient.user_id + " " + Botan::hex_encode(oversized));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("SEND accepts blob exactly at MAX_BLOB_LEN");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        std::vector<uint8_t> max_blob(MAX_BLOB_LEN, 0xCD);
+        std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
+                                       recipient.user_id + " " + Botan::hex_encode(max_blob));
+        ASSERT_EQ(resp, std::string("OK"));
+        close(fd);
+    }
+
     // -------------------------------------------------------
     // POLL
     // -------------------------------------------------------
@@ -244,12 +278,11 @@ int main()
         std::string s_tok =
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
                 .substr(3);
-        std::string r_tok =
-            cmd(fd,
-                "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes))
-                .substr(3);
-        auto blob =
-            encrypt_message("secret message", sender.user_id, "sender", recipient.pubkey_bytes, rng);
+        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                        Botan::hex_encode(recipient.pubkey_bytes))
+                                .substr(3);
+        auto blob = encrypt_message("secret message", sender.user_id, "sender",
+                                    recipient.pubkey_bytes, rng);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
 
@@ -272,10 +305,9 @@ int main()
         std::string s_tok =
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
                 .substr(3);
-        std::string r_tok =
-            cmd(fd,
-                "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes))
-                .substr(3);
+        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                        Botan::hex_encode(recipient.pubkey_bytes))
+                                .substr(3);
         auto blob =
             encrypt_message("end to end", sender.user_id, "alice", recipient.pubkey_bytes, rng);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
