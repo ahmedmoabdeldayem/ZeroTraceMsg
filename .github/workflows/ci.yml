@@ -34,10 +34,7 @@ jobs:
       - name: Create PR to main if none exists
         run: |
           BRANCH="${{ github.ref_name }}"
-          EXISTING=$(gh pr list \
-            --base main --head "$BRANCH" \
-            --state open --json number \
-            --jq '.[0].number // empty')
+          EXISTING=$(gh pr view "$BRANCH" --json number --jq '.number' 2>/dev/null || echo "")
 
           if [ -z "$EXISTING" ]; then
             TITLE=$(echo "$BRANCH" | sed 's|feature/||;s|hotfix/||;s|-| |g')
