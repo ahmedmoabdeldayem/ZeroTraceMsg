@@ -78,9 +78,17 @@ Your user ID is shown at the top of the screen when you connect. Share it with t
 
 ## Usage
 
-**Send a message:**
+**Send a single-line message:**
 ```
 > <recipient_id> hello
+```
+
+**Send a multi-line message** (type `.` alone to send):
+```
+> alice
+... first line
+... second line
+... .
 ```
 
 **Add a contact nickname:**
