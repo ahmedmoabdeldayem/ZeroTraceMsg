@@ -34,16 +34,28 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     auto nonce_bytes = hkdf_expand->derive_key(12, prk, std::vector<uint8_t>{},
                                                std::vector<uint8_t>{'a', 'e', 's', '-', 'i', 'v'});
 
-    // Step 4 — assemble plaintext payload:
-    //   msg_nonce(16) + sender_id(16) + name_len(1) + sender_name + message
+    // Step 4 — assemble and pad plaintext payload:
+    //   msg_nonce(16) + sender_id(16) + name_len(1) + sender_name
+    //   + msg_len(2, big-endian) + message + zero padding → fixed PADDED_PLAINTEXT_LEN
     auto nonce_raw = rng.random_vec(MSG_NONCE_LEN);
     uint8_t name_len = static_cast<uint8_t>(sender_name.size() < 255 ? sender_name.size() : 255);
+
+    constexpr size_t fixed_overhead =
+        MSG_NONCE_LEN + USER_ID_LEN + 1 + 2; // nonce+id+name_len+msg_len
+    if (fixed_overhead + name_len + plaintext.size() > PADDED_PLAINTEXT_LEN)
+        throw std::runtime_error("Message too long to encrypt");
+
+    auto msg_len = static_cast<uint16_t>(plaintext.size());
     Botan::secure_vector<uint8_t> payload;
+    payload.reserve(PADDED_PLAINTEXT_LEN);
     payload.insert(payload.end(), nonce_raw.begin(), nonce_raw.end());
     payload.insert(payload.end(), sender_id.begin(), sender_id.end());
     payload.push_back(name_len);
     payload.insert(payload.end(), sender_name.begin(), sender_name.begin() + name_len);
+    payload.push_back(static_cast<uint8_t>(msg_len >> 8));
+    payload.push_back(static_cast<uint8_t>(msg_len & 0xFF));
     payload.insert(payload.end(), plaintext.begin(), plaintext.end());
+    payload.resize(PADDED_PLAINTEXT_LEN, 0); // zero-pad to fixed size
 
     // Step 5 — AES-256-GCM encrypt
     auto aead = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
@@ -51,8 +63,8 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     aead->start(nonce_bytes);
     aead->finish(payload);
 
-    // Step 6 — blob: ephemeral_pub(65) + ciphertext+tag
-    // Nonce is NOT stored — recipient re-derives it from HKDF using the ephemeral pubkey
+    // Step 6 — blob: ephemeral_pub(65) + ciphertext+tag (always MAX_BLOB_LEN bytes)
+    // HKDF nonce not stored — re-derived from ephemeral pubkey on decrypt
     std::vector<uint8_t> blob;
     blob.insert(blob.end(), ephemeral_pub_bytes.begin(), ephemeral_pub_bytes.end());
     blob.insert(blob.end(), payload.begin(), payload.end());
@@ -63,9 +75,8 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
 DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
                                  const Botan::ECDH_PrivateKey& priv_key, Botan::AutoSeeded_RNG& rng)
 {
-    // blob: ephemeral_pub(65) + ciphertext+tag — minimum: 65 + MSG_NONCE_LEN + USER_ID_LEN + 1 + 16
-    if (blob.size() < 65 + MSG_NONCE_LEN + USER_ID_LEN + 1 + 16)
-        throw std::runtime_error("Blob too short");
+    if (blob.size() != PUBKEY_LEN + PADDED_PLAINTEXT_LEN + GCM_TAG_LEN)
+        throw std::runtime_error("Blob size mismatch");
 
     // Step 1 — parse blob
     std::vector<uint8_t> ephemeral_pub(blob.begin(), blob.begin() + 65);
@@ -93,8 +104,10 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
     aead->start(nonce_bytes);
     aead->finish(ciphertext);
 
-    // Step 5 — parse payload: msg_nonce(16) + sender_id(16) + name_len(1) + sender_name + message
-    if (ciphertext.size() < MSG_NONCE_LEN + USER_ID_LEN + 1)
+    // Step 5 — parse payload:
+    //   msg_nonce(16) + sender_id(16) + name_len(1) + sender_name + msg_len(2) + message + padding
+    constexpr size_t min_payload = MSG_NONCE_LEN + USER_ID_LEN + 1 + 2;
+    if (ciphertext.size() < min_payload)
         throw std::runtime_error("Decrypted payload too short");
 
     DecryptedMessage result;
@@ -108,12 +121,18 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
     pos += USER_ID_LEN;
 
     uint8_t name_len = ciphertext[pos++];
-    if (ciphertext.size() < pos + name_len)
+    if (ciphertext.size() < pos + name_len + 2)
         throw std::runtime_error("Decrypted payload malformed");
 
     result.sender_name = std::string(ciphertext.begin() + pos, ciphertext.begin() + pos + name_len);
     pos += name_len;
-    result.plaintext = std::string(ciphertext.begin() + pos, ciphertext.end());
+
+    uint16_t msg_len = (static_cast<uint16_t>(ciphertext[pos]) << 8) | ciphertext[pos + 1];
+    pos += 2;
+    if (ciphertext.size() < pos + msg_len)
+        throw std::runtime_error("Decrypted payload malformed");
+
+    result.plaintext = std::string(ciphertext.begin() + pos, ciphertext.begin() + pos + msg_len);
 
     return result;
 }

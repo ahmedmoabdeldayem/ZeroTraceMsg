@@ -35,10 +35,10 @@ git commit -m "add padding round-trip test"
 ### Opening a PR
 
 ```bash
-git push origin feature/message-padding
+git push origin feature/my-feature
 ```
 
-CI opens a PR automatically: `feature/message-padding → main`
+Then open a PR on GitHub: `feature/my-feature → main`
 
 PR checklist:
 - [ ] CI passes (all tests green)
@@ -70,7 +70,6 @@ git push origin hotfix/crash-on-empty-blob
 
 | Branch | Feature |
 |--------|---------|
-| `feature/message-padding` | Pad all blobs to fixed 4KB — hides message length |
 | `feature/tls-transport` | Wrap server TCP in TLS — protects session tokens |
 | `feature/contacts-encryption` | Encrypt contacts file at rest |
 | `feature/delivery-confirmation` | Notify sender when message is retrieved |

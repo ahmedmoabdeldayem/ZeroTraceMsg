@@ -16,6 +16,7 @@ Messages are end-to-end encrypted and auto-delete after the recipient reads them
 - **Anonymous identity** — user ID is derived from a public key hash, no name or phone number required
 - **Session tokens** — server issues a random token on registration; no passwords stored server-side
 - **Memory locking** — key material is locked in RAM with `mlock()` to prevent the OS from swapping it to disk
+- **Fixed-size blobs** — all messages are padded to a fixed 4 KB plaintext before encryption; the server cannot infer message length from blob size
 
 ---
 
