@@ -78,7 +78,7 @@ FMT_SRCS = common/crypto.cpp common/crypto.hpp common/identity.cpp common/identi
            common/protocol.hpp common/replay.hpp common/secure_memory.hpp \
            server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
            tests/test_runner.hpp tests/test_identity.cpp tests/test_crypto.cpp \
-           tests/test_protocol.cpp tests/test_replay.cpp
+           tests/test_protocol.cpp tests/test_replay.cpp tests/test_server.cpp
 
 CLANG_FORMAT ?= xcrun clang-format
 

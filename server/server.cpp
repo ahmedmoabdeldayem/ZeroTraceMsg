@@ -145,6 +145,10 @@ static void handle_client(int client_fd)
             }
             try {
                 auto blob = Botan::hex_decode(blob_hex);
+                if (blob.size() > MAX_BLOB_LEN) {
+                    send_line(client_fd, "ERR blob too large");
+                    continue;
+                }
                 std::string msg_id = new_message_id();
                 messages[recipient_id].push_back({msg_id, blob, now_unix()});
                 send_line(client_fd, "OK");
