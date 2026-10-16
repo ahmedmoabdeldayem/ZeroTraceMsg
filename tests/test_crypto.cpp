@@ -150,5 +150,41 @@ int main()
         ASSERT_THROWS(encrypt_message("hello", sender.user_id, "alice", bad_key, rng));
     }
 
+    // -------------------------------------------------------
+    // Padding
+    // -------------------------------------------------------
+    TEST("blob is always MAX_BLOB_LEN bytes regardless of message length");
+    {
+        auto b1 = encrypt_message("hi", sender.user_id, "alice", recipient.pubkey_bytes, rng);
+        auto b2 = encrypt_message(std::string(3000, 'x'), sender.user_id, "alice",
+                                  recipient.pubkey_bytes, rng);
+        ASSERT_EQ(b1.size(), MAX_BLOB_LEN);
+        ASSERT_EQ(b2.size(), MAX_BLOB_LEN);
+    }
+
+    TEST("message at max content length encrypts and decrypts correctly");
+    {
+        // Fixed overhead in payload: nonce(16) + sender_id(16) + name_len(1) + msg_len(2) = 35
+        // Max content = PADDED_PLAINTEXT_LEN - 35 (with empty name)
+        constexpr size_t max_text = PADDED_PLAINTEXT_LEN - MSG_NONCE_LEN - USER_ID_LEN - 1 - 2;
+        std::string big(max_text, 'Z');
+        auto blob = encrypt_message(big, sender.user_id, "", recipient.pubkey_bytes, rng);
+        auto dec = decrypt_message(blob, *recipient.priv_key, rng);
+        ASSERT_EQ(dec.plaintext, big);
+    }
+
+    TEST("message one byte over max throws");
+    {
+        constexpr size_t max_text = PADDED_PLAINTEXT_LEN - MSG_NONCE_LEN - USER_ID_LEN - 1 - 2;
+        std::string too_big(max_text + 1, 'Z');
+        ASSERT_THROWS(encrypt_message(too_big, sender.user_id, "", recipient.pubkey_bytes, rng));
+    }
+
+    TEST("decrypt_message with wrong blob size throws");
+    {
+        std::vector<uint8_t> wrong_size(MAX_BLOB_LEN - 1, 0x00);
+        ASSERT_THROWS(decrypt_message(wrong_size, *recipient.priv_key, rng));
+    }
+
     SUITE_RESULTS();
 }
