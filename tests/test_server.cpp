@@ -244,6 +244,50 @@ int main()
     }
 
     // -------------------------------------------------------
+    // Rate limiting
+    // -------------------------------------------------------
+    TEST("SEND allows burst up to RATE_LIMIT_MSGS");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string blob_hex = Botan::hex_encode(blob);
+        for (int i = 0; i < RATE_LIMIT_MSGS; ++i) {
+            std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
+                                           recipient.user_id + " " + blob_hex);
+            ASSERT_EQ(resp, std::string("OK"));
+        }
+        close(fd);
+    }
+
+    TEST("SEND rejects message after RATE_LIMIT_MSGS in window");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string blob_hex = Botan::hex_encode(blob);
+        for (int i = 0; i < RATE_LIMIT_MSGS; ++i)
+            cmd(fd,
+                "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " + blob_hex);
+        std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
+                                       recipient.user_id + " " + blob_hex);
+        ASSERT_TRUE(resp.find("rate limit") != std::string::npos);
+        close(fd);
+    }
+
+    // -------------------------------------------------------
     // POLL
     // -------------------------------------------------------
     TEST("POLL returns NOMSG when inbox is empty");
