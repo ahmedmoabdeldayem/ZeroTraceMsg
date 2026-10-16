@@ -189,6 +189,10 @@ jobs:
     if: github.event_name == 'pull_request' && github.base_ref == 'dev'
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download coverage number
         uses: actions/download-artifact@v4
         with:
@@ -197,7 +201,11 @@ jobs:
       - name: Compare against dev baseline
         run: |
           LINE_COV=$(cat coverage-number.txt)
-          BASELINE="${{ vars.DEV_COVERAGE_BASELINE }}"
+
+          # Read baseline from the coverage-data branch (created by update-baseline on dev push)
+          git fetch origin coverage-data --depth=1 2>/dev/null || true
+          BASELINE=$(git show origin/coverage-data:dev-coverage.txt 2>/dev/null \
+                     | tr -d '[:space:]' || echo "")
 
           echo "Dev baseline : ${BASELINE:-not set yet}%"
           echo "This PR      : ${LINE_COV}%"
@@ -254,28 +262,44 @@ jobs:
     needs: coverage
     if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
     permissions:
-      variables: write
+      contents: write
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download coverage number
         uses: actions/download-artifact@v4
         with:
           name: coverage-number
 
-      - name: Save as DEV_COVERAGE_BASELINE variable
+      - name: Push new baseline to coverage-data branch
         run: |
           LINE_COV=$(cat coverage-number.txt)
-          echo "Updating DEV_COVERAGE_BASELINE → ${LINE_COV}%"
 
-          gh api --method PATCH \
-            "/repos/${{ github.repository }}/actions/variables/DEV_COVERAGE_BASELINE" \
-            -f value="$LINE_COV" 2>/dev/null || \
-          gh api --method POST \
-            "/repos/${{ github.repository }}/actions/variables" \
-            -f name=DEV_COVERAGE_BASELINE \
-            -f value="$LINE_COV"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          # Switch to coverage-data, creating it as an orphan if it doesn't exist
+          if git fetch origin coverage-data:coverage-data 2>/dev/null; then
+            git checkout coverage-data
+          else
+            git checkout --orphan coverage-data
+            git rm -rf . --quiet 2>/dev/null || true
+            git clean -fd --quiet 2>/dev/null || true
+          fi
+
+          printf '%s\n' "$LINE_COV" > dev-coverage.txt
+          git add dev-coverage.txt
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update coverage baseline to ${LINE_COV}%"
+            git push origin coverage-data
+            echo "Baseline updated → ${LINE_COV}%"
+          else
+            echo "Baseline unchanged (${LINE_COV}%) — nothing to push."
+          fi
 
   # -------------------------------------------------------
   # Create release PR — runs only after a push to dev.
