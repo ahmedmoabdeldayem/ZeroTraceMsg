@@ -1,15 +1,17 @@
 // Tests for common/identity — key generation, derivation, save/load
 
-#include "test_runner.hpp"
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
+#include "test_runner.hpp"
 #include <botan/auto_rng.h>
 #include <botan/hex.h>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
 
-int main() {
+int main()
+{
+    SUITE_INIT("test_identity");
     std::cout << "=== identity tests ===\n\n";
     Botan::AutoSeeded_RNG rng;
 
@@ -20,7 +22,7 @@ int main() {
     {
         auto id = generate_identity(rng);
         ASSERT_EQ(id.user_id.size(), USER_ID_LEN);
-        for(char c : id.user_id)
+        for (char c : id.user_id)
             ASSERT_TRUE((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'));
         std::cout << "  user_id: " << id.user_id << "\n";
     }
@@ -51,7 +53,7 @@ int main() {
     {
         auto id = generate_identity(rng);
         ASSERT_EQ(id.pubkey_bytes.size(), PUBKEY_LEN);
-        ASSERT_EQ(id.pubkey_bytes[0], 0x04);  // uncompressed point prefix
+        ASSERT_EQ(id.pubkey_bytes[0], 0x04); // uncompressed point prefix
     }
 
     // -------------------------------------------------------
@@ -65,7 +67,7 @@ int main() {
         save_identity(id, "test-passphrase", tmp_file, rng);
 
         auto loaded = load_identity("test-passphrase", tmp_file);
-        ASSERT_EQ(id.user_id,      loaded.user_id);
+        ASSERT_EQ(id.user_id, loaded.user_id);
         ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
         std::cout << "  user_id preserved: " << loaded.user_id << "\n";
     }
@@ -88,7 +90,7 @@ int main() {
         std::ifstream f2(tmp_file, std::ios::binary);
         std::string c2((std::istreambuf_iterator<char>(f2)), {});
 
-        ASSERT_NE(c1, c2);  // different random salts
+        ASSERT_NE(c1, c2); // different random salts
     }
 
     TEST("load from nonexistent file throws");

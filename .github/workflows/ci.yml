@@ -2,49 +2,165 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, 'feature/**', 'hotfix/**' ]
   pull_request:
     branches: [ main, dev ]
 
+# Cancel in-progress runs for the same branch on new push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  # -------------------------------------------------------
+  # Build — verifies server and client compile cleanly.
+  # Fast gate: catches compile errors before all other jobs.
+  # -------------------------------------------------------
+  build:
+    name: Build
     runs-on: macos-latest
 
     steps:
-      - name: Checkout with submodules
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Cache Botan build
-        uses: actions/cache@v4
-        id: botan-cache
+      - uses: ./.github/actions/setup-botan
+
+      - name: Build server and client
+        run: make all
+
+  # -------------------------------------------------------
+  # Test — compiles and runs all test suites, publishes
+  # per-test results to the GitHub checks panel.
+  # -------------------------------------------------------
+  test:
+    name: Test
+    runs-on: macos-latest
+    needs: build
+    permissions:
+      checks: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
         with:
-          path: |
-            include/
-            lib/
-            bin/
-          key: botan-${{ runner.os }}-${{ hashFiles('botan-src/configure.py', 'botan-src/src/build-data/version.txt') }}
+          submodules: recursive
 
-      - name: Build Botan
-        if: steps.botan-cache.outputs.cache-hit != 'true'
-        run: |
-          cd botan-src
-          ./configure.py --prefix=${{ github.workspace }}
-          make -j$(sysctl -n hw.logicalcpu)
-          make install
-          cd ..
-          codesign --force --sign - lib/libbotan-3.dylib
+      - uses: ./.github/actions/setup-botan
 
-      - name: Re-sign Botan (cache restore)
-        if: steps.botan-cache.outputs.cache-hit == 'true'
-        run: codesign --force --sign - lib/libbotan-3.dylib
-
-      - name: Build and run tests
+      - name: Run tests
         run: make test
 
-      - name: Build coverage report
+      - name: Publish test report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Test Results
+          path: test-results/*.xml
+          reporter: java-junit
+          fail-on-error: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
+  # Sanitize — recompiles tests with ASan + UBSan and runs
+  # them. Catches memory errors and undefined behaviour that
+  # pass normal tests. Runs parallel with test.
+  # -------------------------------------------------------
+  sanitize:
+    name: Sanitize (ASan + UBSan)
+    runs-on: macos-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-botan
+
+      - name: Run tests with ASan + UBSan
+        run: make sanitize
+
+  # -------------------------------------------------------
+  # Lint — clang-format enforcement and clang-tidy analysis.
+  # Runs parallel with test and sanitize.
+  # -------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-botan
+
+      - name: Check clang-format
+        run: make format-check
+
+      - name: Install clang-tidy
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Run clang-tidy
+        run: make tidy CLANG_TIDY="$(brew --prefix llvm)/bin/clang-tidy"
+
+  # -------------------------------------------------------
+  # Coverage — compiles with instrumentation, enforces the
+  # 80% floor, writes a summary, and publishes the HTML
+  # artifact. Also saves the line % for downstream jobs.
+  # -------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: macos-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-botan
+
+      - name: Build and run with coverage
         run: make coverage
+
+      - name: Enforce 80% floor and save number
+        run: |
+          LINE_COV=$(xcrun llvm-cov report build/test_identity \
+            -object build/test_crypto \
+            -object build/test_protocol \
+            -object build/test_replay \
+            -instr-profile=coverage.profdata \
+            common/identity.cpp common/crypto.cpp common/replay.hpp \
+            | grep TOTAL | awk '{print $10}' | tr -d '%')
+
+          echo "Line coverage: ${LINE_COV}%"
+
+          if [ "$(echo "$LINE_COV < 80" | bc -l)" -eq 1 ]; then
+            echo "Coverage ${LINE_COV}% is below the 80% floor — failing build."
+            exit 1
+          fi
+
+          echo "$LINE_COV" > coverage-number.txt
+
+      - name: Write coverage summary
+        run: |
+          {
+            echo '## Coverage'
+            echo '```'
+            xcrun llvm-cov report build/test_identity \
+              -object build/test_crypto \
+              -object build/test_protocol \
+              -object build/test_replay \
+              -instr-profile=coverage.profdata \
+              common/identity.cpp common/crypto.cpp common/replay.hpp
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -53,8 +169,146 @@ jobs:
           path: coverage_report/
           retention-days: 30
 
-      - name: Print coverage summary
+      - name: Upload coverage number
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-number
+          path: coverage-number.txt
+          retention-days: 1
+
+  # -------------------------------------------------------
+  # Coverage gate — runs only on PRs targeting dev.
+  # Downloads the number saved by the coverage job and
+  # compares it against the last known dev baseline.
+  # Fails if this PR would regress coverage.
+  # -------------------------------------------------------
+  coverage-gate:
+    name: Coverage Gate (vs dev baseline)
+    runs-on: ubuntu-latest
+    needs: coverage
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+
+    steps:
+      - name: Download coverage number
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-number
+
+      - name: Compare against dev baseline
         run: |
-          xcrun llvm-cov report tests/test_identity \
-            -instr-profile=coverage.profdata \
-            common/identity.cpp common/crypto.cpp
+          LINE_COV=$(cat coverage-number.txt)
+          BASELINE="${{ vars.DEV_COVERAGE_BASELINE }}"
+
+          echo "Dev baseline : ${BASELINE:-not set yet}%"
+          echo "This PR      : ${LINE_COV}%"
+
+          if [ -z "$BASELINE" ] || [ "$BASELINE" = "0" ]; then
+            echo "No baseline recorded yet — accepting any coverage."
+            exit 0
+          fi
+
+          if [ "$(echo "$LINE_COV < $BASELINE" | bc -l)" -eq 1 ]; then
+            echo "❌ Coverage regression: ${LINE_COV}% is below dev baseline ${BASELINE}%"
+            exit 1
+          fi
+
+          echo "✅ Coverage OK: ${LINE_COV}% >= ${BASELINE}%"
+
+  # -------------------------------------------------------
+  # Auto merge — runs only on PRs targeting dev, after every
+  # quality gate has passed. Enables GitHub's native
+  # auto-merge so the PR squash-merges immediately.
+  #
+  # Requires repo setting: Settings → General → Allow auto-merge
+  # Requires dev branch protection: no required reviewers,
+  #   required checks = Build / Test / Sanitize / Lint /
+  #   Coverage Gate (vs dev baseline)
+  # -------------------------------------------------------
+  auto-merge:
+    name: Auto Merge to Dev
+    runs-on: ubuntu-latest
+    needs: [ test, sanitize, lint, coverage-gate ]
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    permissions:
+      pull-requests: write
+      contents: write
+
+    steps:
+      - name: Enable auto-merge
+        run: |
+          gh pr merge "${{ github.event.pull_request.number }}" \
+            --auto --squash \
+            --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
+  # Update baseline — runs only after a push to dev
+  # (i.e. after a feature branch was merged). Saves the new
+  # line coverage % as a repository variable so future PRs
+  # can compare against it.
+  # -------------------------------------------------------
+  update-baseline:
+    name: Update Coverage Baseline
+    runs-on: ubuntu-latest
+    needs: coverage
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    permissions:
+      variables: write
+
+    steps:
+      - name: Download coverage number
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-number
+
+      - name: Save as DEV_COVERAGE_BASELINE variable
+        run: |
+          LINE_COV=$(cat coverage-number.txt)
+          echo "Updating DEV_COVERAGE_BASELINE → ${LINE_COV}%"
+
+          gh api --method PATCH \
+            "/repos/${{ github.repository }}/actions/variables/DEV_COVERAGE_BASELINE" \
+            -f value="$LINE_COV" 2>/dev/null || \
+          gh api --method POST \
+            "/repos/${{ github.repository }}/actions/variables" \
+            -f name=DEV_COVERAGE_BASELINE \
+            -f value="$LINE_COV"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
+  # Create release PR — runs only after a push to dev.
+  # Opens a dev → main PR for the owner to review.
+  # Skips silently if one is already open.
+  # -------------------------------------------------------
+  create-release-pr:
+    name: Open Release PR (dev → main)
+    runs-on: ubuntu-latest
+    needs: [ test, sanitize, lint, coverage ]
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create PR if none exists
+        run: |
+          EXISTING=$(gh pr list \
+            --base main --head dev \
+            --state open --json number \
+            --jq '.[0].number // empty')
+
+          if [ -z "$EXISTING" ]; then
+            gh pr create \
+              --base main \
+              --head dev \
+              --title "Release: dev → main" \
+              --body "All CI checks passed on dev. Review and approve to release to main."
+            echo "PR created."
+          else
+            echo "PR #${EXISTING} already open — no action needed."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
