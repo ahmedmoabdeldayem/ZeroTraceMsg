@@ -34,9 +34,15 @@ struct PendingMessage {
     int64_t timestamp;
 };
 
+struct RateBucket {
+    int count{0};
+    int64_t window_start{0};
+};
+
 static std::map<std::string, std::vector<uint8_t>> pubkeys;
 static std::map<std::string, std::vector<PendingMessage>> messages;
 static std::map<std::string, std::string> tokens;
+static std::map<std::string, RateBucket> rate_buckets;
 static std::mutex store_mutex;
 
 static std::string new_message_id()
@@ -138,6 +144,19 @@ static void handle_client(int client_fd)
             if (!sender_valid) {
                 send_line(client_fd, "ERR invalid token");
                 continue;
+            }
+            {
+                auto& bucket = rate_buckets[sender_id];
+                int64_t now = now_unix();
+                if (now - bucket.window_start >= RATE_LIMIT_WINDOW_S) {
+                    bucket.count = 0;
+                    bucket.window_start = now;
+                }
+                if (bucket.count >= RATE_LIMIT_MSGS) {
+                    send_line(client_fd, "ERR rate limit exceeded");
+                    continue;
+                }
+                bucket.count++;
             }
             if (pubkeys.find(recipient_id) == pubkeys.end()) {
                 send_line(client_fd, "ERR unknown recipient");
@@ -247,4 +266,5 @@ void reset_server_state()
     pubkeys.clear();
     messages.clear();
     tokens.clear();
+    rate_buckets.clear();
 }

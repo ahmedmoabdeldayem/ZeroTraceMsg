@@ -17,3 +17,7 @@ static constexpr size_t MSG_NONCE_LEN = 16; // random nonce sealed in payload fo
 static constexpr size_t MAX_LINE_LEN = 1024 * 1024; // 1 MB max line length
 static constexpr size_t MAX_BLOB_LEN =
     8 * 1024; // 8 KB max encrypted blob (tightened when padding lands)
+
+// Rate limiting
+static constexpr int RATE_LIMIT_MSGS = 20;     // max messages per user per window
+static constexpr int RATE_LIMIT_WINDOW_S = 60; // window duration in seconds
