@@ -242,8 +242,13 @@ static void redraw_screen_locked()
         std::string name = msg.sender_name.empty() ? display_name(msg.sender_id) : msg.sender_name;
         std::cout << "\033[2K" << "from: " << name << "  (auto-deletes in ~2 min)\n";
         lines++;
-        std::cout << "\033[2K" << msg.text << "\n";
-        lines++;
+        // split on embedded newlines — each line needs its own \033[2K clear
+        std::istringstream ts(msg.text);
+        std::string tl;
+        while (std::getline(ts, tl)) {
+            std::cout << "\033[2K" << tl << "\n";
+            lines++;
+        }
         std::cout << "\033[2K─────────────────────────\n\n";
         lines += 2;
     }
@@ -473,13 +478,41 @@ int main(int argc, char* argv[])
                 add_contact(id, nick);
             }
         } else {
-            // <id or nickname> <message>
+            // <id or nickname> [message]
+            // If no message follows, enter multi-line mode: type lines, then "." to send.
             std::string resolved = resolve_id(first);
             if (!resolved.empty()) {
                 std::string text;
                 std::getline(ss >> std::ws, text);
-                if (!text.empty())
-                    do_send(fd, resolved, text);
+
+                if (text.empty()) {
+                    // multi-line mode
+                    std::string collected;
+                    std::string ml;
+                    std::cout << "... " << std::flush;
+                    while (std::getline(std::cin, ml)) {
+                        if (ml == ".")
+                            break;
+                        if (!collected.empty())
+                            collected += '\n';
+                        collected += ml;
+                        std::cout << "... " << std::flush;
+                    }
+                    text = collected;
+                }
+
+                if (!text.empty()) {
+                    // guard against exceeding PADDED_PLAINTEXT_LEN
+                    constexpr size_t fixed_overhead = MSG_NONCE_LEN + USER_ID_LEN + 1 + 2;
+                    size_t name_bytes = std::min(username_local.size(), size_t(255));
+                    if (text.size() + fixed_overhead + name_bytes > PADDED_PLAINTEXT_LEN) {
+                        std::cout << "\n[message too long — max "
+                                  << (PADDED_PLAINTEXT_LEN - fixed_overhead - name_bytes)
+                                  << " bytes]\n";
+                    } else {
+                        do_send(fd, resolved, text);
+                    }
+                }
             }
         }
 

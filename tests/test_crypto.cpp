@@ -29,6 +29,15 @@ int main()
         ASSERT_EQ(dec.sender_name, std::string("alice"));
     }
 
+    TEST("message with embedded newlines round-trips correctly");
+    {
+        std::string multiline = "line one\nline two\nline three";
+        auto blob =
+            encrypt_message(multiline, sender.user_id, "alice", recipient.pubkey_bytes, rng);
+        auto dec = decrypt_message(blob, *recipient.priv_key, rng);
+        ASSERT_EQ(dec.plaintext, multiline);
+    }
+
     TEST("empty message round-trip");
     {
         auto blob = encrypt_message("", sender.user_id, "alice", recipient.pubkey_bytes, rng);
