@@ -59,7 +59,9 @@ jobs:
     runs-on: macos-latest
     if: >
       github.event_name == 'pull_request' ||
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/heads/feature/') ||
+      startsWith(github.ref, 'refs/heads/hotfix/')
 
     steps:
       - uses: actions/checkout@v4
