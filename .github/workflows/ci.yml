@@ -13,6 +13,47 @@ concurrency:
 
 jobs:
   # -------------------------------------------------------
+  # Open feature PR — runs on every push to a feature or
+  # hotfix branch. Creates a PR targeting dev if none exists.
+  # The PR then triggers the pull_request CI run, which runs
+  # coverage-gate and auto-merge once all checks pass.
+  # -------------------------------------------------------
+  create-feature-pr:
+    name: Open Feature PR (→ dev)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' &&
+      (startsWith(github.ref, 'refs/heads/feature/') ||
+       startsWith(github.ref, 'refs/heads/hotfix/'))
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create PR to dev if none exists
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          EXISTING=$(gh pr list \
+            --base dev --head "$BRANCH" \
+            --state open --json number \
+            --jq '.[0].number // empty')
+
+          if [ -z "$EXISTING" ]; then
+            TITLE=$(echo "$BRANCH" | sed 's|feature/||;s|hotfix/||;s|-| |g')
+            gh pr create \
+              --base dev \
+              --head "$BRANCH" \
+              --title "$TITLE" \
+              --body "Automated PR — all CI checks must pass to auto-merge into dev."
+            echo "PR created: ${BRANCH} → dev"
+          else
+            echo "PR #${EXISTING} already open — skipping."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
   # Build — verifies server and client compile cleanly.
   # Fast gate: catches compile errors before all other jobs.
   # -------------------------------------------------------
