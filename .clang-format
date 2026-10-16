@@ -1,0 +1,8 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+BreakBeforeBraces: Linux
+ColumnLimit: 100
+PointerAlignment: Left
+SpaceBeforeCpp11BracedList: false
+SortIncludes: true
+SpaceAfterCStyleCast: false

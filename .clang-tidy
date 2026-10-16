@@ -1,0 +1,17 @@
+Checks: >-
+  clang-diagnostic-*,
+  bugprone-use-after-move,
+  bugprone-dangling-handle,
+  bugprone-infinite-loop,
+  bugprone-string-constructor,
+  bugprone-suspicious-string-compare,
+  bugprone-unchecked-optional-access,
+  performance-unnecessary-copy-initialization,
+  performance-move-const-arg,
+  performance-no-automatic-move
+
+# Only report issues in our own source files — not in Botan or system headers.
+HeaderFilterRegex: '(common|client|server|tests)/.*'
+
+WarningsAsErrors: '*'
+FormatStyle: file

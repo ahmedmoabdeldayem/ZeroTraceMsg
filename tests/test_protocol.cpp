@@ -1,13 +1,15 @@
 // Tests for protocol constants and integration of identity + crypto
 
-#include "test_runner.hpp"
-#include "../common/protocol.hpp"
-#include "../common/identity.hpp"
 #include "../common/crypto.hpp"
+#include "../common/identity.hpp"
+#include "../common/protocol.hpp"
+#include "test_runner.hpp"
 #include <botan/auto_rng.h>
 #include <iostream>
 
-int main() {
+int main()
+{
+    SUITE_INIT("test_protocol");
     std::cout << "=== protocol tests ===\n\n";
     Botan::AutoSeeded_RNG rng;
 
@@ -54,38 +56,34 @@ int main() {
     TEST("full pipeline: alice sends to bob, bob decrypts correctly");
     {
         auto alice = generate_identity(rng);
-        auto bob   = generate_identity(rng);
+        auto bob = generate_identity(rng);
 
         std::string message = "hello bob, this is alice";
-        auto blob = encrypt_message(message, alice.user_id, "alice",
-                                    bob.pubkey_bytes, rng);
+        auto blob = encrypt_message(message, alice.user_id, "alice", bob.pubkey_bytes, rng);
 
         auto dec = decrypt_message(blob, *bob.priv_key, rng);
-        ASSERT_EQ(dec.plaintext,   message);
-        ASSERT_EQ(dec.sender_id,   alice.user_id);
+        ASSERT_EQ(dec.plaintext, message);
+        ASSERT_EQ(dec.sender_id, alice.user_id);
         ASSERT_EQ(dec.sender_name, std::string("alice"));
     }
 
     TEST("bob cannot decrypt message meant for carol");
     {
         auto alice = generate_identity(rng);
-        auto bob   = generate_identity(rng);
+        auto bob = generate_identity(rng);
         auto carol = generate_identity(rng);
 
-        auto blob = encrypt_message("secret", alice.user_id, "alice",
-                                    carol.pubkey_bytes, rng);
+        auto blob = encrypt_message("secret", alice.user_id, "alice", carol.pubkey_bytes, rng);
         ASSERT_THROWS(decrypt_message(blob, *bob.priv_key, rng));
     }
 
     TEST("forward secrecy: two messages have independent ciphertexts");
     {
         auto alice = generate_identity(rng);
-        auto bob   = generate_identity(rng);
+        auto bob = generate_identity(rng);
 
-        auto blob1 = encrypt_message("msg1", alice.user_id, "alice",
-                                     bob.pubkey_bytes, rng);
-        auto blob2 = encrypt_message("msg2", alice.user_id, "alice",
-                                     bob.pubkey_bytes, rng);
+        auto blob1 = encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng);
+        auto blob2 = encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng);
 
         // different ephemeral keys → completely different blobs
         ASSERT_NE(blob1, blob2);
@@ -100,10 +98,9 @@ int main() {
     TEST("unicode message round-trip");
     {
         auto alice = generate_identity(rng);
-        auto bob   = generate_identity(rng);
+        auto bob = generate_identity(rng);
         std::string unicode = "مرحبا بالعالم 🔒";
-        auto blob = encrypt_message(unicode, alice.user_id, "alice",
-                                    bob.pubkey_bytes, rng);
+        auto blob = encrypt_message(unicode, alice.user_id, "alice", bob.pubkey_bytes, rng);
         auto dec = decrypt_message(blob, *bob.priv_key, rng);
         ASSERT_EQ(dec.plaintext, unicode);
     }

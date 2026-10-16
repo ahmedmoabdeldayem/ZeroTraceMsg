@@ -2,24 +2,27 @@ CXX      = c++
 CXXFLAGS = -std=c++20 -I./include/botan-3 -I. -Wall -pthread
 LDFLAGS  = -L./lib -lbotan-3 -Wl,-rpath,$(shell pwd)/lib -lpthread
 
+BUILD  = build
 COMMON = common/identity.cpp common/crypto.cpp
+TESTS  = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol $(BUILD)/test_replay
 
-TESTS = tests/test_identity tests/test_crypto tests/test_protocol
+.PHONY: all setup test sanitize coverage format format-check tidy clean
 
-.PHONY: all setup test coverage clean
+all: $(BUILD)/msg_server $(BUILD)/msg_client
 
-all: msg_server msg_client
-
-msg_server: server/main.cpp $(COMMON)
+$(BUILD)/msg_server: server/main.cpp $(COMMON)
+	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
-msg_client: client/main.cpp $(COMMON)
+$(BUILD)/msg_client: client/main.cpp $(COMMON)
+	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 # -------------------------------------------------------
 # Tests — build and run all test binaries
 # -------------------------------------------------------
-tests/test_%: tests/test_%.cpp $(COMMON)
+$(BUILD)/test_%: tests/test_%.cpp $(COMMON)
+	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 test: $(TESTS)
@@ -38,8 +41,58 @@ test: $(TESTS)
 	fi
 
 # -------------------------------------------------------
+# Sanitizers — ASan + UBSan (run: make sanitize)
+# In CI each job has a clean env; locally run 'make clean' first.
+# detect_container_overflow=0: suppresses a false positive from
+# Botan's secure_vector custom allocator (pre-built, not instrumented).
+# -------------------------------------------------------
+SANFLAGS = -fsanitize=address,undefined -fno-sanitize-recover=all -g
+
+sanitize: CXXFLAGS += $(SANFLAGS)
+sanitize: LDFLAGS  += $(SANFLAGS)
+sanitize: clean $(TESTS)
+	@echo ""
+	@failed=0; \
+	for t in $(TESTS); do \
+		echo "--- $$t ---"; \
+		ASAN_OPTIONS=detect_container_overflow=0 ./$$t || failed=$$((failed + 1)); \
+	done; \
+	echo ""; \
+	if [ $$failed -eq 0 ]; then \
+		echo "All sanitizer tests passed."; \
+	else \
+		echo "$$failed sanitizer suite(s) failed."; \
+		exit 1; \
+	fi
+
+# -------------------------------------------------------
+# clang-format — format: rewrite in place, format-check: CI gate
+# -------------------------------------------------------
+FMT_SRCS = common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
+           common/protocol.hpp common/replay.hpp server/main.cpp client/main.cpp \
+           tests/test_runner.hpp tests/test_identity.cpp tests/test_crypto.cpp \
+           tests/test_protocol.cpp tests/test_replay.cpp
+
+CLANG_FORMAT ?= xcrun clang-format
+
+format:
+	$(CLANG_FORMAT) -i $(FMT_SRCS)
+
+format-check:
+	$(CLANG_FORMAT) --dry-run --Werror $(FMT_SRCS)
+
+# -------------------------------------------------------
+# clang-tidy — static analysis (requires llvm: brew install llvm)
+# -------------------------------------------------------
+CLANG_TIDY ?= clang-tidy
+TIDY_SRCS   = common/identity.cpp common/crypto.cpp server/main.cpp client/main.cpp
+TIDY_FLAGS  = -std=c++20 -I./include/botan-3 -I.
+
+tidy:
+	$(CLANG_TIDY) $(TIDY_SRCS) -- $(TIDY_FLAGS)
+
+# -------------------------------------------------------
 # Coverage — uses LLVM source-based coverage (Xcode built-in)
-# No extra tools needed — llvm-cov and llvm-profdata ship with Xcode
 # -------------------------------------------------------
 LLVM_COV      = xcrun llvm-cov
 LLVM_PROFDATA = xcrun llvm-profdata
@@ -49,23 +102,35 @@ coverage: CXXFLAGS += $(COVFLAGS)
 coverage: LDFLAGS  += $(COVFLAGS)
 coverage: clean $(TESTS)
 	@echo "Running tests with coverage instrumentation..."
-	@LLVM_PROFILE_FILE="tests/test_identity.profraw" ./tests/test_identity
-	@LLVM_PROFILE_FILE="tests/test_crypto.profraw"   ./tests/test_crypto
-	@LLVM_PROFILE_FILE="tests/test_protocol.profraw" ./tests/test_protocol
-	$(LLVM_PROFDATA) merge -sparse tests/*.profraw -o coverage.profdata
+	@LLVM_PROFILE_FILE="$(BUILD)/test_identity.profraw"  ./$(BUILD)/test_identity
+	@LLVM_PROFILE_FILE="$(BUILD)/test_crypto.profraw"    ./$(BUILD)/test_crypto
+	@LLVM_PROFILE_FILE="$(BUILD)/test_protocol.profraw"  ./$(BUILD)/test_protocol
+	@LLVM_PROFILE_FILE="$(BUILD)/test_replay.profraw"    ./$(BUILD)/test_replay
+	$(LLVM_PROFDATA) merge -sparse \
+	    $(BUILD)/test_identity.profraw \
+	    $(BUILD)/test_crypto.profraw \
+	    $(BUILD)/test_protocol.profraw \
+	    $(BUILD)/test_replay.profraw \
+	    -o coverage.profdata
 	@echo ""
 	@echo "=== Coverage summary ==="
-	$(LLVM_COV) report tests/test_identity \
+	$(LLVM_COV) report $(BUILD)/test_identity \
+	    -object $(BUILD)/test_crypto \
+	    -object $(BUILD)/test_protocol \
+	    -object $(BUILD)/test_replay \
 	    -instr-profile=coverage.profdata \
-	    common/identity.cpp common/crypto.cpp
+	    common/identity.cpp common/crypto.cpp common/replay.hpp
 	@echo ""
 	@echo "=== Generating HTML report ==="
-	$(LLVM_COV) show tests/test_identity \
+	$(LLVM_COV) show $(BUILD)/test_identity \
+	    -object $(BUILD)/test_crypto \
+	    -object $(BUILD)/test_protocol \
+	    -object $(BUILD)/test_replay \
 	    -instr-profile=coverage.profdata \
 	    -format=html \
 	    -output-dir=coverage_report \
 	    -show-line-counts-or-regions \
-	    common/identity.cpp common/crypto.cpp
+	    common/identity.cpp common/crypto.cpp common/replay.hpp
 	@echo ""
 	@echo "Coverage report: coverage_report/index.html"
 
@@ -81,6 +146,6 @@ setup:
 	codesign --force --sign - lib/libbotan-3.dylib
 
 clean:
-	rm -f msg_server msg_client $(TESTS)
-	rm -f *.gcda *.gcno common/*.gcda common/*.gcno tests/*.gcda tests/*.gcno
+	rm -rf $(BUILD)/
+	rm -f coverage.profdata
 	rm -rf coverage_report coverage.info coverage_filtered.info
