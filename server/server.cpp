@@ -102,8 +102,8 @@ static void handle_client(int client_fd)
                 pubkeys[user_id] = pubkey;
                 tokens[user_id] = token;
                 send_line(client_fd, "OK " + token);
-                std::cout << "[REGISTER] user=" << user_id
-                          << " total_users=" << pubkeys.size() << "\n";
+                std::cout << "[REGISTER] user=" << user_id << " total_users=" << pubkeys.size()
+                          << "\n";
             } catch (...) {
                 send_line(client_fd, "ERR invalid pubkey");
             }
@@ -193,8 +193,9 @@ static void cleanup_thread()
         int64_t cutoff = now_unix() - MSG_TTL_SERVER_S;
         std::lock_guard<std::mutex> lock(store_mutex);
         for (auto& [uid, msgs] : messages) {
-            msgs.erase(std::remove_if(msgs.begin(), msgs.end(),
-                           [cutoff](const PendingMessage& m) { return m.timestamp < cutoff; }),
+            msgs.erase(
+                std::remove_if(msgs.begin(), msgs.end(),
+                               [cutoff](const PendingMessage& m) { return m.timestamp < cutoff; }),
                 msgs.end());
         }
     }
