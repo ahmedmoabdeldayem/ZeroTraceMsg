@@ -64,9 +64,9 @@ int main()
     TEST("save and load round-trip preserves identity");
     {
         auto id = generate_identity(rng);
-        save_identity(id, "test-passphrase", tmp_file, rng);
+        save_identity(id, make_secure("test-passphrase"), tmp_file, rng);
 
-        auto loaded = load_identity("test-passphrase", tmp_file);
+        auto loaded = load_identity(make_secure("test-passphrase"), tmp_file);
         ASSERT_EQ(id.user_id, loaded.user_id);
         ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
         std::cout << "  user_id preserved: " << loaded.user_id << "\n";
@@ -75,18 +75,18 @@ int main()
     TEST("wrong passphrase throws on load");
     {
         auto id = generate_identity(rng);
-        save_identity(id, "correct-pass", tmp_file, rng);
-        ASSERT_THROWS(load_identity("wrong-pass", tmp_file));
+        save_identity(id, make_secure("correct-pass"), tmp_file, rng);
+        ASSERT_THROWS(load_identity(make_secure("wrong-pass"), tmp_file));
     }
 
     TEST("different saves produce different ciphertext (random salt)");
     {
         auto id = generate_identity(rng);
-        save_identity(id, "same-pass", tmp_file, rng);
+        save_identity(id, make_secure("same-pass"), tmp_file, rng);
         std::ifstream f1(tmp_file, std::ios::binary);
         std::string c1((std::istreambuf_iterator<char>(f1)), {});
 
-        save_identity(id, "same-pass", tmp_file, rng);
+        save_identity(id, make_secure("same-pass"), tmp_file, rng);
         std::ifstream f2(tmp_file, std::ios::binary);
         std::string c2((std::istreambuf_iterator<char>(f2)), {});
 
@@ -95,7 +95,7 @@ int main()
 
     TEST("load from nonexistent file throws");
     {
-        ASSERT_THROWS(load_identity("pass", "/tmp/ztm_nonexistent_xyz.enc"));
+        ASSERT_THROWS(load_identity(make_secure("pass"), "/tmp/ztm_nonexistent_xyz.enc"));
     }
 
     std::remove(tmp_file.c_str());
