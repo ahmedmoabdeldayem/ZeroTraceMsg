@@ -8,7 +8,6 @@
 #include <atomic>
 #include <botan/auto_rng.h>
 #include <botan/hex.h>
-#include <botan/mem_ops.h>
 #include <chrono>
 #include <iostream>
 #include <map>
@@ -20,6 +19,14 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+static bool ct_equal(const uint8_t* a, const uint8_t* b, size_t len)
+{
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; ++i)
+        diff |= a[i] ^ b[i];
+    return diff == 0;
+}
 
 struct PendingMessage {
     std::string id;
@@ -126,9 +133,8 @@ static void handle_client(int client_fd)
             auto tok_it = tokens.find(sender_id);
             bool sender_valid =
                 tok_it != tokens.end() && tok_it->second.size() == token.size() &&
-                Botan::constant_time_compare(
-                    reinterpret_cast<const uint8_t*>(tok_it->second.data()),
-                    reinterpret_cast<const uint8_t*>(token.data()), tok_it->second.size());
+                ct_equal(reinterpret_cast<const uint8_t*>(tok_it->second.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), tok_it->second.size());
             if (!sender_valid) {
                 send_line(client_fd, "ERR invalid token");
                 continue;
@@ -156,9 +162,8 @@ static void handle_client(int client_fd)
             auto tok_it = tokens.find(user_id);
             bool token_valid =
                 tok_it != tokens.end() && tok_it->second.size() == token.size() &&
-                Botan::constant_time_compare(
-                    reinterpret_cast<const uint8_t*>(tok_it->second.data()),
-                    reinterpret_cast<const uint8_t*>(token.data()), tok_it->second.size());
+                ct_equal(reinterpret_cast<const uint8_t*>(tok_it->second.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), tok_it->second.size());
             if (!token_valid) {
                 send_line(client_fd, "ERR invalid token");
                 std::cout << "[POLL]     user=" << user_id << " -> REJECTED invalid token\n";
