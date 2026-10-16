@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+
+jobs:
+  test:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache Botan build
+        uses: actions/cache@v4
+        id: botan-cache
+        with:
+          path: |
+            include/
+            lib/
+            bin/
+          key: botan-${{ runner.os }}-${{ hashFiles('botan-src/configure.py', 'botan-src/src/build-data/version.txt') }}
+
+      - name: Build Botan
+        if: steps.botan-cache.outputs.cache-hit != 'true'
+        run: |
+          cd botan-src
+          ./configure.py --prefix=${{ github.workspace }}
+          make -j$(sysctl -n hw.logicalcpu)
+          make install
+          cd ..
+          codesign --force --sign - lib/libbotan-3.dylib
+
+      - name: Re-sign Botan (cache restore)
+        if: steps.botan-cache.outputs.cache-hit == 'true'
+        run: codesign --force --sign - lib/libbotan-3.dylib
+
+      - name: Build and run tests
+        run: make test
+
+      - name: Build coverage report
+        run: make coverage
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage_report/
+          retention-days: 30
+
+      - name: Print coverage summary
+        run: |
+          xcrun llvm-cov report tests/test_identity \
+            -instr-profile=coverage.profdata \
+            common/identity.cpp common/crypto.cpp

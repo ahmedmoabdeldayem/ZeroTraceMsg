@@ -1,0 +1,112 @@
+// Tests for protocol constants and integration of identity + crypto
+
+#include "test_runner.hpp"
+#include "../common/protocol.hpp"
+#include "../common/identity.hpp"
+#include "../common/crypto.hpp"
+#include <botan/auto_rng.h>
+#include <iostream>
+
+int main() {
+    std::cout << "=== protocol tests ===\n\n";
+    Botan::AutoSeeded_RNG rng;
+
+    // -------------------------------------------------------
+    // Protocol constants
+    // -------------------------------------------------------
+    TEST("USER_ID_LEN is 16");
+    ASSERT_EQ(USER_ID_LEN, (size_t)16);
+
+    TEST("PUBKEY_LEN is 65");
+    ASSERT_EQ(PUBKEY_LEN, (size_t)65);
+
+    TEST("MSG_TTL_CLIENT_S is 120 seconds");
+    ASSERT_EQ(MSG_TTL_CLIENT_S, 120);
+
+    TEST("MSG_TTL_SERVER_S is 48 hours");
+    ASSERT_EQ(MSG_TTL_SERVER_S, 172800);
+
+    TEST("MAX_LINE_LEN is 1MB");
+    ASSERT_EQ(MAX_LINE_LEN, (size_t)(1024 * 1024));
+
+    // -------------------------------------------------------
+    // user_id validation (what server checks on REGISTER)
+    // -------------------------------------------------------
+    TEST("derived user_id matches hash of pubkey");
+    {
+        auto id = generate_identity(rng);
+        std::string recomputed = derive_user_id(id.pubkey_bytes);
+        ASSERT_EQ(id.user_id, recomputed);
+    }
+
+    TEST("modified pubkey produces different user_id");
+    {
+        auto id = generate_identity(rng);
+        auto modified = id.pubkey_bytes;
+        modified[10] ^= 0xFF;
+        std::string wrong_id = derive_user_id(modified);
+        ASSERT_NE(id.user_id, wrong_id);
+    }
+
+    // -------------------------------------------------------
+    // Full encrypt → decrypt pipeline (simulates a message exchange)
+    // -------------------------------------------------------
+    TEST("full pipeline: alice sends to bob, bob decrypts correctly");
+    {
+        auto alice = generate_identity(rng);
+        auto bob   = generate_identity(rng);
+
+        std::string message = "hello bob, this is alice";
+        auto blob = encrypt_message(message, alice.user_id, "alice",
+                                    bob.pubkey_bytes, rng);
+
+        auto dec = decrypt_message(blob, *bob.priv_key, rng);
+        ASSERT_EQ(dec.plaintext,   message);
+        ASSERT_EQ(dec.sender_id,   alice.user_id);
+        ASSERT_EQ(dec.sender_name, std::string("alice"));
+    }
+
+    TEST("bob cannot decrypt message meant for carol");
+    {
+        auto alice = generate_identity(rng);
+        auto bob   = generate_identity(rng);
+        auto carol = generate_identity(rng);
+
+        auto blob = encrypt_message("secret", alice.user_id, "alice",
+                                    carol.pubkey_bytes, rng);
+        ASSERT_THROWS(decrypt_message(blob, *bob.priv_key, rng));
+    }
+
+    TEST("forward secrecy: two messages have independent ciphertexts");
+    {
+        auto alice = generate_identity(rng);
+        auto bob   = generate_identity(rng);
+
+        auto blob1 = encrypt_message("msg1", alice.user_id, "alice",
+                                     bob.pubkey_bytes, rng);
+        auto blob2 = encrypt_message("msg2", alice.user_id, "alice",
+                                     bob.pubkey_bytes, rng);
+
+        // different ephemeral keys → completely different blobs
+        ASSERT_NE(blob1, blob2);
+
+        // both still decrypt correctly
+        auto dec1 = decrypt_message(blob1, *bob.priv_key, rng);
+        auto dec2 = decrypt_message(blob2, *bob.priv_key, rng);
+        ASSERT_EQ(dec1.plaintext, std::string("msg1"));
+        ASSERT_EQ(dec2.plaintext, std::string("msg2"));
+    }
+
+    TEST("unicode message round-trip");
+    {
+        auto alice = generate_identity(rng);
+        auto bob   = generate_identity(rng);
+        std::string unicode = "مرحبا بالعالم 🔒";
+        auto blob = encrypt_message(unicode, alice.user_id, "alice",
+                                    bob.pubkey_bytes, rng);
+        auto dec = decrypt_message(blob, *bob.priv_key, rng);
+        ASSERT_EQ(dec.plaintext, unicode);
+    }
+
+    SUITE_RESULTS();
+}
