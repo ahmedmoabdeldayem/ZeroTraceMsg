@@ -1,0 +1,31 @@
+name: Setup Botan
+description: Restore Botan from cache, or build and cache it. Handles re-signing after cache restore.
+
+runs:
+  using: composite
+  steps:
+    - name: Cache Botan
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          include/
+          lib/
+          bin/
+        key: botan-${{ runner.os }}-${{ hashFiles('botan-src/configure.py', 'botan-src/src/build-data/version.txt') }}
+
+    - name: Build Botan
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cd botan-src
+        ./configure.py --prefix="$GITHUB_WORKSPACE"
+        make -j$(sysctl -n hw.logicalcpu)
+        make install
+        cd ..
+        codesign --force --sign - lib/libbotan-3.dylib
+
+    - name: Re-sign Botan
+      if: steps.cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: codesign --force --sign - lib/libbotan-3.dylib

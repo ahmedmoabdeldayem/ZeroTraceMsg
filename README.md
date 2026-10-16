@@ -11,6 +11,7 @@ Messages are end-to-end encrypted and auto-delete after the recipient reads them
 - **End-to-end encrypted** — hybrid encryption (ECDH + HKDF + AES-256-GCM) per message
 - **Sealed sender** — sender identity is encrypted inside the message; server only knows the recipient
 - **Ephemeral keys** — a fresh key pair is generated for every message and immediately discarded
+- **Replay protection** — each message carries a random 16-byte nonce sealed inside the ciphertext; the client tracks seen nonces and silently drops any blob it has already delivered
 - **Auto-delete** — messages are wiped from the client after 2 minutes and from the server after 48 hours if unread
 - **Anonymous identity** — user ID is derived from a public key hash, no name or phone number required
 - **Session tokens** — server issues a random token on registration; no passwords stored server-side
@@ -49,17 +50,17 @@ make all
 
 **Terminal 1 — start the server:**
 ```bash
-./msg_server
+./build/msg_server
 ```
 
 **Terminal 2 — first user:**
 ```bash
-./msg_client alice 127.0.0.1
+./build/msg_client alice 127.0.0.1
 ```
 
 **Terminal 3 — second user:**
 ```bash
-./msg_client bob 127.0.0.1
+./build/msg_client bob 127.0.0.1
 ```
 
 Your user ID is shown at the top of the screen when you connect. Share it with the other person out of band.

@@ -2,49 +2,213 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev ]
+    branches: [ main, dev, 'feature/**', 'hotfix/**' ]
   pull_request:
     branches: [ main, dev ]
 
+# Cancel in-progress runs for the same branch on new push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  # -------------------------------------------------------
+  # Open feature PR — runs on every push to a feature or
+  # hotfix branch. Creates a PR targeting dev if none exists.
+  # The PR then triggers the pull_request CI run, which runs
+  # coverage-gate and auto-merge once all checks pass.
+  # -------------------------------------------------------
+  create-feature-pr:
+    name: Open Feature PR (→ dev)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' &&
+      (startsWith(github.ref, 'refs/heads/feature/') ||
+       startsWith(github.ref, 'refs/heads/hotfix/'))
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create PR to dev if none exists
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          EXISTING=$(gh pr list \
+            --base dev --head "$BRANCH" \
+            --state open --json number \
+            --jq '.[0].number // empty')
+
+          if [ -z "$EXISTING" ]; then
+            TITLE=$(echo "$BRANCH" | sed 's|feature/||;s|hotfix/||;s|-| |g')
+            gh pr create \
+              --base dev \
+              --head "$BRANCH" \
+              --title "$TITLE" \
+              --body "Automated PR — all CI checks must pass to auto-merge into dev."
+            echo "PR created: ${BRANCH} → dev"
+          else
+            echo "PR #${EXISTING} already open — skipping."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
+  # Build — verifies server and client compile cleanly.
+  # Fast gate: catches compile errors before all other jobs.
+  # -------------------------------------------------------
+  build:
+    name: Build
     runs-on: macos-latest
 
     steps:
-      - name: Checkout with submodules
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Cache Botan build
-        uses: actions/cache@v4
-        id: botan-cache
+      - uses: ./.github/actions/setup-botan
+
+      - name: Build server and client
+        run: make all
+
+  # -------------------------------------------------------
+  # Test — compiles and runs all test suites, publishes
+  # per-test results to the GitHub checks panel.
+  # -------------------------------------------------------
+  test:
+    name: Test
+    runs-on: macos-latest
+    needs: build
+    permissions:
+      checks: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
         with:
-          path: |
-            include/
-            lib/
-            bin/
-          key: botan-${{ runner.os }}-${{ hashFiles('botan-src/configure.py', 'botan-src/src/build-data/version.txt') }}
+          submodules: recursive
 
-      - name: Build Botan
-        if: steps.botan-cache.outputs.cache-hit != 'true'
-        run: |
-          cd botan-src
-          ./configure.py --prefix=${{ github.workspace }}
-          make -j$(sysctl -n hw.logicalcpu)
-          make install
-          cd ..
-          codesign --force --sign - lib/libbotan-3.dylib
+      - uses: ./.github/actions/setup-botan
 
-      - name: Re-sign Botan (cache restore)
-        if: steps.botan-cache.outputs.cache-hit == 'true'
-        run: codesign --force --sign - lib/libbotan-3.dylib
-
-      - name: Build and run tests
+      - name: Run tests
         run: make test
 
-      - name: Build coverage report
+      - name: Stage test results for reporter
+        if: always()
+        run: |
+          mkdir -p /tmp/test-results
+          cp test-results/*.xml /tmp/test-results/
+
+      - name: Publish test report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Test Results
+          path: /tmp/test-results/*.xml
+          reporter: java-junit
+          fail-on-error: true
+          fail-on-empty: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
+  # Sanitize — recompiles tests with ASan + UBSan and runs
+  # them. Catches memory errors and undefined behaviour that
+  # pass normal tests. Runs parallel with test.
+  # -------------------------------------------------------
+  sanitize:
+    name: Sanitize (ASan + UBSan)
+    runs-on: macos-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-botan
+
+      - name: Run tests with ASan + UBSan
+        run: make sanitize
+
+  # -------------------------------------------------------
+  # Lint — clang-format enforcement and clang-tidy analysis.
+  # Runs parallel with test and sanitize.
+  # -------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: macos-latest
+    needs: build
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-botan
+
+      - name: Check clang-format
+        run: make format-check
+
+      - name: Install clang-tidy
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Run clang-tidy
+        run: make tidy CLANG_TIDY="$(brew --prefix llvm)/bin/clang-tidy"
+
+  # -------------------------------------------------------
+  # Coverage — compiles with instrumentation, enforces the
+  # 80% floor, writes a summary, and publishes the HTML
+  # artifact. Also saves the line % for downstream jobs.
+  # -------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: macos-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-botan
+
+      - name: Build and run with coverage
         run: make coverage
+
+      - name: Enforce 80% floor and save number
+        run: |
+          LINE_COV=$(xcrun llvm-cov report build/test_identity \
+            -object build/test_crypto \
+            -object build/test_protocol \
+            -object build/test_replay \
+            -instr-profile=coverage.profdata \
+            common/identity.cpp common/crypto.cpp common/replay.hpp \
+            | grep TOTAL | awk '{print $10}' | tr -d '%')
+
+          echo "Line coverage: ${LINE_COV}%"
+
+          if [ "$(echo "$LINE_COV < 80" | bc -l)" -eq 1 ]; then
+            echo "Coverage ${LINE_COV}% is below the 80% floor — failing build."
+            exit 1
+          fi
+
+          echo "$LINE_COV" > coverage-number.txt
+
+      - name: Write coverage summary
+        run: |
+          {
+            echo '## Coverage'
+            echo '```'
+            xcrun llvm-cov report build/test_identity \
+              -object build/test_crypto \
+              -object build/test_protocol \
+              -object build/test_replay \
+              -instr-profile=coverage.profdata \
+              common/identity.cpp common/crypto.cpp common/replay.hpp
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -53,8 +217,167 @@ jobs:
           path: coverage_report/
           retention-days: 30
 
-      - name: Print coverage summary
+      - name: Upload coverage number
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-number
+          path: coverage-number.txt
+          retention-days: 1
+
+  # -------------------------------------------------------
+  # Coverage gate — runs only on PRs targeting dev.
+  # Downloads the number saved by the coverage job and
+  # compares it against the last known dev baseline.
+  # Fails if this PR would regress coverage.
+  # -------------------------------------------------------
+  coverage-gate:
+    name: Coverage Gate (vs dev baseline)
+    runs-on: ubuntu-latest
+    needs: coverage
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage number
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-number
+
+      - name: Compare against dev baseline
         run: |
-          xcrun llvm-cov report tests/test_identity \
-            -instr-profile=coverage.profdata \
-            common/identity.cpp common/crypto.cpp
+          LINE_COV=$(cat coverage-number.txt)
+
+          # Read baseline from the coverage-data branch (created by update-baseline on dev push)
+          git fetch origin coverage-data --depth=1 2>/dev/null || true
+          BASELINE=$(git show origin/coverage-data:dev-coverage.txt 2>/dev/null \
+                     | tr -d '[:space:]' || echo "")
+
+          echo "Dev baseline : ${BASELINE:-not set yet}%"
+          echo "This PR      : ${LINE_COV}%"
+
+          if [ -z "$BASELINE" ] || [ "$BASELINE" = "0" ]; then
+            echo "No baseline recorded yet — accepting any coverage."
+            exit 0
+          fi
+
+          if [ "$(echo "$LINE_COV < $BASELINE" | bc -l)" -eq 1 ]; then
+            echo "❌ Coverage regression: ${LINE_COV}% is below dev baseline ${BASELINE}%"
+            exit 1
+          fi
+
+          echo "✅ Coverage OK: ${LINE_COV}% >= ${BASELINE}%"
+
+  # -------------------------------------------------------
+  # Auto merge — runs on PRs targeting dev after all gates
+  # pass. Merges immediately (not --auto) so that the
+  # update-baseline and create-release-pr jobs can chain
+  # off it in the same CI run.
+  #
+  # Note: GITHUB_TOKEN merges don't trigger new workflow
+  # runs (GitHub blocks recursive loops), so downstream
+  # jobs must run here rather than on a push-to-dev event.
+  # -------------------------------------------------------
+  auto-merge:
+    name: Auto Merge to Dev
+    runs-on: ubuntu-latest
+    needs: [ test, sanitize, lint, coverage-gate ]
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    permissions:
+      pull-requests: write
+      contents: write
+
+    steps:
+      - name: Merge PR
+        run: |
+          gh pr merge "${{ github.event.pull_request.number }}" \
+            --squash --delete-branch \
+            --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -------------------------------------------------------
+  # Update baseline — chains off auto-merge in the same run.
+  # Saves the line coverage % so future PRs can compare.
+  # -------------------------------------------------------
+  update-baseline:
+    name: Update Coverage Baseline
+    runs-on: ubuntu-latest
+    needs: [ auto-merge, coverage ]
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage number
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-number
+
+      - name: Push new baseline to coverage-data branch
+        run: |
+          LINE_COV=$(cat coverage-number.txt)
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          if git fetch origin coverage-data:coverage-data 2>/dev/null; then
+            git checkout coverage-data
+          else
+            git checkout --orphan coverage-data
+            git rm -rf . --quiet 2>/dev/null || true
+            git clean -fd --quiet 2>/dev/null || true
+          fi
+
+          printf '%s\n' "$LINE_COV" > dev-coverage.txt
+          git add dev-coverage.txt
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update coverage baseline to ${LINE_COV}%"
+            git push origin coverage-data
+            echo "Baseline updated → ${LINE_COV}%"
+          else
+            echo "Baseline unchanged (${LINE_COV}%) — nothing to push."
+          fi
+
+  # -------------------------------------------------------
+  # Create release PR — chains off auto-merge in the same
+  # run. Opens dev → main PR for the owner to review.
+  # Skips silently if one is already open.
+  # -------------------------------------------------------
+  create-release-pr:
+    name: Open Release PR (dev → main)
+    runs-on: ubuntu-latest
+    needs: auto-merge
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
+    permissions:
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create PR if none exists
+        run: |
+          EXISTING=$(gh pr list \
+            --base main --head dev \
+            --state open --json number \
+            --jq '.[0].number // empty')
+
+          if [ -z "$EXISTING" ]; then
+            gh pr create \
+              --base main \
+              --head dev \
+              --title "Release: dev → main" \
+              --body "All CI checks passed on dev. Review and approve to release to main."
+            echo "PR created."
+          else
+            echo "PR #${EXISTING} already open — no action needed."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
