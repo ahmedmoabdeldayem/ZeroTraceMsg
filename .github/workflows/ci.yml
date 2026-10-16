@@ -271,14 +271,14 @@ jobs:
           echo "✅ Coverage OK: ${LINE_COV}% >= ${BASELINE}%"
 
   # -------------------------------------------------------
-  # Auto merge — runs only on PRs targeting dev, after every
-  # quality gate has passed. Enables GitHub's native
-  # auto-merge so the PR squash-merges immediately.
+  # Auto merge — runs on PRs targeting dev after all gates
+  # pass. Merges immediately (not --auto) so that the
+  # update-baseline and create-release-pr jobs can chain
+  # off it in the same CI run.
   #
-  # Requires repo setting: Settings → General → Allow auto-merge
-  # Requires dev branch protection: no required reviewers,
-  #   required checks = Build / Test / Sanitize / Lint /
-  #   Coverage Gate (vs dev baseline)
+  # Note: GITHUB_TOKEN merges don't trigger new workflow
+  # runs (GitHub blocks recursive loops), so downstream
+  # jobs must run here rather than on a push-to-dev event.
   # -------------------------------------------------------
   auto-merge:
     name: Auto Merge to Dev
@@ -290,25 +290,23 @@ jobs:
       contents: write
 
     steps:
-      - name: Enable auto-merge
+      - name: Merge PR
         run: |
           gh pr merge "${{ github.event.pull_request.number }}" \
-            --auto --squash \
+            --squash --delete-branch \
             --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # -------------------------------------------------------
-  # Update baseline — runs only after a push to dev
-  # (i.e. after a feature branch was merged). Saves the new
-  # line coverage % as a repository variable so future PRs
-  # can compare against it.
+  # Update baseline — chains off auto-merge in the same run.
+  # Saves the line coverage % so future PRs can compare.
   # -------------------------------------------------------
   update-baseline:
     name: Update Coverage Baseline
     runs-on: ubuntu-latest
-    needs: coverage
-    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    needs: [ auto-merge, coverage ]
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
     permissions:
       contents: write
 
@@ -329,7 +327,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
 
-          # Switch to coverage-data, creating it as an orphan if it doesn't exist
           if git fetch origin coverage-data:coverage-data 2>/dev/null; then
             git checkout coverage-data
           else
@@ -350,15 +347,15 @@ jobs:
           fi
 
   # -------------------------------------------------------
-  # Create release PR — runs only after a push to dev.
-  # Opens a dev → main PR for the owner to review.
+  # Create release PR — chains off auto-merge in the same
+  # run. Opens dev → main PR for the owner to review.
   # Skips silently if one is already open.
   # -------------------------------------------------------
   create-release-pr:
     name: Open Release PR (dev → main)
     runs-on: ubuntu-latest
-    needs: [ test, sanitize, lint, coverage ]
-    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
+    needs: auto-merge
+    if: github.event_name == 'pull_request' && github.base_ref == 'dev'
     permissions:
       pull-requests: write
 

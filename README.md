@@ -50,17 +50,17 @@ make all
 
 **Terminal 1 — start the server:**
 ```bash
-./msg_server
+./build/msg_server
 ```
 
 **Terminal 2 — first user:**
 ```bash
-./msg_client alice 127.0.0.1
+./build/msg_client alice 127.0.0.1
 ```
 
 **Terminal 3 — second user:**
 ```bash
-./msg_client bob 127.0.0.1
+./build/msg_client bob 127.0.0.1
 ```
 
 Your user ID is shown at the top of the screen when you connect. Share it with the other person out of band.
