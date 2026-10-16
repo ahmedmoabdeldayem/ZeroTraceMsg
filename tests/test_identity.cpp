@@ -98,6 +98,25 @@ int main()
         ASSERT_THROWS(load_identity(make_secure("pass"), "/tmp/ztm_nonexistent_xyz.enc"));
     }
 
+    // -------------------------------------------------------
+    // SecureString / make_secure
+    // -------------------------------------------------------
+    TEST("make_secure from string literal holds correct bytes");
+    {
+        auto s = make_secure("hello");
+        ASSERT_EQ(s.size(), (size_t)5);
+        ASSERT_EQ(s[0], 'h');
+        ASSERT_EQ(s[4], 'o');
+    }
+
+    TEST("make_secure from std::string holds correct bytes");
+    {
+        std::string src = "world";
+        auto s = make_secure(src);
+        ASSERT_EQ(s.size(), src.size());
+        ASSERT_EQ(std::string(s.begin(), s.end()), src);
+    }
+
     std::remove(tmp_file.c_str());
     SUITE_RESULTS();
 }

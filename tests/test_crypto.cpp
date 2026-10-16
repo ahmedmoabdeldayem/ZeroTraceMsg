@@ -144,5 +144,11 @@ int main()
         ASSERT_EQ(blob_str.find(sender.user_id), std::string::npos);
     }
 
+    TEST("encrypt_message with garbage pubkey throws");
+    {
+        std::vector<uint8_t> bad_key(65, 0xFF);
+        ASSERT_THROWS(encrypt_message("hello", sender.user_id, "alice", bad_key, rng));
+    }
+
     SUITE_RESULTS();
 }

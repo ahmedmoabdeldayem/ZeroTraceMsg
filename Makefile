@@ -3,14 +3,16 @@ CXXFLAGS = -std=c++20 -I./include/botan-3 -I. -Wall -pthread
 LDFLAGS  = -L./lib -lbotan-3 -Wl,-rpath,$(shell pwd)/lib -lpthread
 
 BUILD  = build
-COMMON = common/identity.cpp common/crypto.cpp
-TESTS  = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol $(BUILD)/test_replay
+COMMON     = common/identity.cpp common/crypto.cpp
+SERVER_SRC = server/server.cpp
+TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
+             $(BUILD)/test_replay $(BUILD)/test_server
 
 .PHONY: all setup test sanitize coverage format format-check tidy clean
 
 all: $(BUILD)/msg_server $(BUILD)/msg_client
 
-$(BUILD)/msg_server: server/main.cpp $(COMMON)
+$(BUILD)/msg_server: server/main.cpp $(SERVER_SRC) $(COMMON)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
@@ -21,6 +23,10 @@ $(BUILD)/msg_client: client/main.cpp $(COMMON)
 # -------------------------------------------------------
 # Tests — build and run all test binaries
 # -------------------------------------------------------
+$(BUILD)/test_server: tests/test_server.cpp $(SERVER_SRC) $(COMMON)
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 $(BUILD)/test_%: tests/test_%.cpp $(COMMON)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
@@ -70,7 +76,7 @@ sanitize: clean $(TESTS)
 # -------------------------------------------------------
 FMT_SRCS = common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
            common/protocol.hpp common/replay.hpp common/secure_memory.hpp \
-           server/main.cpp client/main.cpp \
+           server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
            tests/test_runner.hpp tests/test_identity.cpp tests/test_crypto.cpp \
            tests/test_protocol.cpp tests/test_replay.cpp
 
@@ -86,7 +92,7 @@ format-check:
 # clang-tidy — static analysis (requires llvm: brew install llvm)
 # -------------------------------------------------------
 CLANG_TIDY ?= clang-tidy
-TIDY_SRCS   = common/identity.cpp common/crypto.cpp server/main.cpp client/main.cpp
+TIDY_SRCS   = common/identity.cpp common/crypto.cpp $(SERVER_SRC) client/main.cpp
 TIDY_FLAGS  = -std=c++20 -I./include/botan-3 -I.
 
 tidy:
@@ -107,11 +113,13 @@ coverage: clean $(TESTS)
 	@LLVM_PROFILE_FILE="$(BUILD)/test_crypto.profraw"    ./$(BUILD)/test_crypto
 	@LLVM_PROFILE_FILE="$(BUILD)/test_protocol.profraw"  ./$(BUILD)/test_protocol
 	@LLVM_PROFILE_FILE="$(BUILD)/test_replay.profraw"    ./$(BUILD)/test_replay
+	@LLVM_PROFILE_FILE="$(BUILD)/test_server.profraw"    ./$(BUILD)/test_server
 	$(LLVM_PROFDATA) merge -sparse \
 	    $(BUILD)/test_identity.profraw \
 	    $(BUILD)/test_crypto.profraw \
 	    $(BUILD)/test_protocol.profraw \
 	    $(BUILD)/test_replay.profraw \
+	    $(BUILD)/test_server.profraw \
 	    -o coverage.profdata
 	@echo ""
 	@echo "=== Coverage summary ==="
@@ -119,19 +127,21 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_crypto \
 	    -object $(BUILD)/test_protocol \
 	    -object $(BUILD)/test_replay \
+	    -object $(BUILD)/test_server \
 	    -instr-profile=coverage.profdata \
-	    common/identity.cpp common/crypto.cpp common/replay.hpp
+	    common/identity.cpp common/crypto.cpp common/replay.hpp $(SERVER_SRC)
 	@echo ""
 	@echo "=== Generating HTML report ==="
 	$(LLVM_COV) show $(BUILD)/test_identity \
 	    -object $(BUILD)/test_crypto \
 	    -object $(BUILD)/test_protocol \
 	    -object $(BUILD)/test_replay \
+	    -object $(BUILD)/test_server \
 	    -instr-profile=coverage.profdata \
 	    -format=html \
 	    -output-dir=coverage_report \
 	    -show-line-counts-or-regions \
-	    common/identity.cpp common/crypto.cpp common/replay.hpp
+	    common/identity.cpp common/crypto.cpp common/replay.hpp $(SERVER_SRC)
 	@echo ""
 	@echo "Coverage report: coverage_report/index.html"
 
