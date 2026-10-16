@@ -1,4 +1,5 @@
 #pragma once
+#include "secure_memory.hpp"
 #include <botan/auto_rng.h>
 #include <botan/ec_group.h>
 #include <botan/ecdh.h>
@@ -20,10 +21,12 @@ Identity generate_identity(Botan::AutoSeeded_RNG& rng);
 // Derive user ID from a public key — deterministic
 std::string derive_user_id(const std::vector<uint8_t>& pubkey_bytes);
 
-// Save identity to file, encrypted with passphrase
+// Save identity to file, encrypted with passphrase.
+// passphrase is held in mlocked memory — not swappable, zeroed on destruction.
 // Format: salt(16) + nonce(12) + encrypted_privkey(raw_bytes + 16 byte GCM tag)
-void save_identity(const Identity& id, const std::string& passphrase, const std::string& path,
+void save_identity(const Identity& id, const SecureString& passphrase, const std::string& path,
                    Botan::AutoSeeded_RNG& rng);
 
-// Load identity from file — throws on wrong passphrase or corrupt file
-Identity load_identity(const std::string& passphrase, const std::string& path);
+// Load identity from file — throws on wrong passphrase or corrupt file.
+// passphrase is held in mlocked memory — not swappable, zeroed on destruction.
+Identity load_identity(const SecureString& passphrase, const std::string& path);
