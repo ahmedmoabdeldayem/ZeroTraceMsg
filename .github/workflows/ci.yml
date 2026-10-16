@@ -293,10 +293,10 @@ jobs:
       contents: write
 
     steps:
-      - name: Merge PR
+      - name: Enable auto-merge
         run: |
           gh pr merge "${{ github.event.pull_request.number }}" \
-            --squash --delete-branch \
+            --auto --squash --delete-branch \
             --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
