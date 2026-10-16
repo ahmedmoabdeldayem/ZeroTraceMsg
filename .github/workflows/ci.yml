@@ -96,10 +96,8 @@ jobs:
       - name: Stage test results for reporter
         if: always()
         run: |
-          echo "=== test-results/ ===" && ls -la test-results/ 2>&1 || echo "not found"
           mkdir -p /tmp/test-results
-          cp test-results/*.xml /tmp/test-results/ 2>&1 || echo "cp failed"
-          echo "=== /tmp/test-results/ ===" && ls -la /tmp/test-results/ 2>&1
+          cp test-results/*.xml /tmp/test-results/
 
       - name: Publish test report
         uses: dorny/test-reporter@v1
