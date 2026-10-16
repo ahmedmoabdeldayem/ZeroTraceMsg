@@ -176,9 +176,10 @@ static void handle_client(int client_fd)
                 msg.id = new_message_id();
                 msg.blob = blob;
                 msg.timestamp = now_unix();
+                std::string msg_id = msg.id;
                 messages[recipient_id].push_back(std::move(msg));
                 send_line(client_fd, "OK");
-                std::cout << "[SEND]     to=" << recipient_id << " msg_id=" << msg.id
+                std::cout << "[SEND]     to=" << recipient_id << " msg_id=" << msg_id
                           << " blob=" << blob.size() << " bytes"
                           << " (server cannot read content)\n";
             } catch (...) {
