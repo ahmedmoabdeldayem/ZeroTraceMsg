@@ -15,6 +15,7 @@ int main()
     SUITE_INIT("test_replay");
     std::cout << "=== replay tests ===\n\n";
     Botan::AutoSeeded_RNG rng;
+    Config cfg;
 
     // -------------------------------------------------------
     // ReplayGuard unit tests
@@ -48,15 +49,22 @@ int main()
         ReplayGuard guard;
         std::vector<uint8_t> a(16, 0x00);
         std::vector<uint8_t> b(16, 0x00);
-        b[15] = 0x01;
+        b[7] = 0x01;
         ASSERT_TRUE(guard.check_and_insert(a));
         ASSERT_TRUE(guard.check_and_insert(b));
     }
 
-    TEST("guard instances are independent");
+    TEST("zero nonce is accepted");
+    {
+        ReplayGuard guard;
+        std::vector<uint8_t> nonce(16, 0x00);
+        ASSERT_TRUE(guard.check_and_insert(nonce));
+    }
+
+    TEST("independent guards don't share state");
     {
         ReplayGuard g1, g2;
-        std::vector<uint8_t> nonce(16, 0xFF);
+        std::vector<uint8_t> nonce(16, 0xCC);
         ASSERT_TRUE(g1.check_and_insert(nonce));
         ASSERT_TRUE(!g1.check_and_insert(nonce));
         ASSERT_TRUE(g2.check_and_insert(nonce)); // g2 has never seen it
@@ -68,42 +76,46 @@ int main()
     TEST("first decryption of a blob is accepted by ReplayGuard");
     {
         ReplayGuard guard;
-        auto alice = generate_identity(rng);
-        auto bob = generate_identity(rng);
+        auto alice = generate_identity(rng, cfg);
+        auto bob = generate_identity(rng, cfg);
 
-        auto blob = encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng);
-        auto dec = decrypt_message(blob, *bob.priv_key, rng);
+        auto blob =
+            encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto dec = decrypt_message(blob, bob, rng, cfg);
         ASSERT_TRUE(guard.check_and_insert(dec.msg_nonce));
     }
 
     TEST("replaying the same blob is rejected by ReplayGuard");
     {
         ReplayGuard guard;
-        auto alice = generate_identity(rng);
-        auto bob = generate_identity(rng);
+        auto alice = generate_identity(rng, cfg);
+        auto bob = generate_identity(rng, cfg);
 
-        auto blob = encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng);
+        auto blob =
+            encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
 
         // first delivery — accepted
-        auto dec1 = decrypt_message(blob, *bob.priv_key, rng);
+        auto dec1 = decrypt_message(blob, bob, rng, cfg);
         ASSERT_TRUE(guard.check_and_insert(dec1.msg_nonce));
 
         // replay — same blob, same nonce → rejected
-        auto dec2 = decrypt_message(blob, *bob.priv_key, rng);
+        auto dec2 = decrypt_message(blob, bob, rng, cfg);
         ASSERT_TRUE(!guard.check_and_insert(dec2.msg_nonce));
     }
 
     TEST("two distinct messages both accepted");
     {
         ReplayGuard guard;
-        auto alice = generate_identity(rng);
-        auto bob = generate_identity(rng);
+        auto alice = generate_identity(rng, cfg);
+        auto bob = generate_identity(rng, cfg);
 
-        auto blob1 = encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng);
-        auto blob2 = encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng);
+        auto blob1 =
+            encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob2 =
+            encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
 
-        auto dec1 = decrypt_message(blob1, *bob.priv_key, rng);
-        auto dec2 = decrypt_message(blob2, *bob.priv_key, rng);
+        auto dec1 = decrypt_message(blob1, bob, rng, cfg);
+        auto dec2 = decrypt_message(blob2, bob, rng, cfg);
 
         ASSERT_TRUE(guard.check_and_insert(dec1.msg_nonce));
         ASSERT_TRUE(guard.check_and_insert(dec2.msg_nonce));

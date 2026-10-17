@@ -3,7 +3,7 @@ CXXFLAGS = -std=c++20 -I./include/botan-3 -I. -Wall -pthread
 LDFLAGS  = -L./lib -lbotan-3 -Wl,-rpath,$(shell pwd)/lib -lpthread
 
 BUILD  = build
-COMMON     = common/identity.cpp common/crypto.cpp
+COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp
 SERVER_SRC = server/server.cpp
 TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
              $(BUILD)/test_replay $(BUILD)/test_server
@@ -74,7 +74,8 @@ sanitize: clean $(TESTS)
 # -------------------------------------------------------
 # clang-format — format: rewrite in place, format-check: CI gate
 # -------------------------------------------------------
-FMT_SRCS = common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
+FMT_SRCS = common/config.cpp common/config.hpp common/kem.cpp common/kem.hpp \
+           common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
            common/protocol.hpp common/replay.hpp common/secure_memory.hpp common/tls_utils.hpp \
            server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
            tests/test_runner.hpp tests/test_identity.cpp tests/test_crypto.cpp \
@@ -92,7 +93,7 @@ format-check:
 # clang-tidy — static analysis (requires llvm: brew install llvm)
 # -------------------------------------------------------
 CLANG_TIDY ?= clang-tidy
-TIDY_SRCS   = common/identity.cpp common/crypto.cpp $(SERVER_SRC) client/main.cpp
+TIDY_SRCS   = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp $(SERVER_SRC) client/main.cpp
 TIDY_FLAGS  = -std=c++20 -I./include/botan-3 -I.
 
 tidy:

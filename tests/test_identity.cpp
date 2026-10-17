@@ -14,13 +14,14 @@ int main()
     SUITE_INIT("test_identity");
     std::cout << "=== identity tests ===\n\n";
     Botan::AutoSeeded_RNG rng;
+    Config cfg;
 
     // -------------------------------------------------------
     // derive_user_id
     // -------------------------------------------------------
     TEST("derive_user_id produces 16 hex chars");
     {
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, cfg);
         ASSERT_EQ(id.user_id.size(), USER_ID_LEN);
         for (char c : id.user_id)
             ASSERT_TRUE((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'));
@@ -29,29 +30,29 @@ int main()
 
     TEST("derive_user_id is deterministic");
     {
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, cfg);
         std::string id2 = derive_user_id(id.pubkey_bytes);
         ASSERT_EQ(id.user_id, id2);
     }
 
     TEST("different identities produce different user IDs");
     {
-        auto id1 = generate_identity(rng);
-        auto id2 = generate_identity(rng);
+        auto id1 = generate_identity(rng, cfg);
+        auto id2 = generate_identity(rng, cfg);
         ASSERT_NE(id1.user_id, id2.user_id);
         ASSERT_NE(id1.pubkey_bytes, id2.pubkey_bytes);
     }
 
     TEST("user_id matches SHA-256(pubkey)[0:8]");
     {
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, cfg);
         std::string computed = derive_user_id(id.pubkey_bytes);
         ASSERT_EQ(id.user_id, computed);
     }
 
     TEST("pubkey is 1184 bytes (ML-KEM-768)");
     {
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, cfg);
         ASSERT_EQ(id.pubkey_bytes.size(), ML_KEM_PUBKEY_LEN);
     }
 
@@ -62,10 +63,10 @@ int main()
 
     TEST("save and load round-trip preserves identity");
     {
-        auto id = generate_identity(rng);
-        save_identity(id, make_secure("test-passphrase"), tmp_file, rng);
+        auto id = generate_identity(rng, cfg);
+        save_identity(id, make_secure("test-passphrase"), tmp_file, rng, cfg);
 
-        auto loaded = load_identity(make_secure("test-passphrase"), tmp_file);
+        auto loaded = load_identity(make_secure("test-passphrase"), tmp_file, cfg);
         ASSERT_EQ(id.user_id, loaded.user_id);
         ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
         std::cout << "  user_id preserved: " << loaded.user_id << "\n";
@@ -73,19 +74,19 @@ int main()
 
     TEST("wrong passphrase throws on load");
     {
-        auto id = generate_identity(rng);
-        save_identity(id, make_secure("correct-pass"), tmp_file, rng);
-        ASSERT_THROWS(load_identity(make_secure("wrong-pass"), tmp_file));
+        auto id = generate_identity(rng, cfg);
+        save_identity(id, make_secure("correct-pass"), tmp_file, rng, cfg);
+        ASSERT_THROWS(load_identity(make_secure("wrong-pass"), tmp_file, cfg));
     }
 
     TEST("different saves produce different ciphertext (random salt)");
     {
-        auto id = generate_identity(rng);
-        save_identity(id, make_secure("same-pass"), tmp_file, rng);
+        auto id = generate_identity(rng, cfg);
+        save_identity(id, make_secure("same-pass"), tmp_file, rng, cfg);
         std::ifstream f1(tmp_file, std::ios::binary);
         std::string c1((std::istreambuf_iterator<char>(f1)), {});
 
-        save_identity(id, make_secure("same-pass"), tmp_file, rng);
+        save_identity(id, make_secure("same-pass"), tmp_file, rng, cfg);
         std::ifstream f2(tmp_file, std::ios::binary);
         std::string c2((std::istreambuf_iterator<char>(f2)), {});
 
@@ -94,7 +95,7 @@ int main()
 
     TEST("load from nonexistent file throws");
     {
-        ASSERT_THROWS(load_identity(make_secure("pass"), "/tmp/ztm_nonexistent_xyz.enc"));
+        ASSERT_THROWS(load_identity(make_secure("pass"), "/tmp/ztm_nonexistent_xyz.enc", cfg));
     }
 
     // -------------------------------------------------------

@@ -1,7 +1,7 @@
 // Secure Messaging Client
-// Usage: ./client <identity_file> <server_ip>
-// Example: ./client alice.enc 127.0.0.1
+// Usage: ./client <username> [server_ip] [--config path]
 
+#include "../common/config.hpp"
 #include "../common/crypto.hpp"
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
@@ -51,6 +51,7 @@ class ClientCredentials : public Botan::Credentials_Manager
 
 static std::shared_ptr<ClientCallbacks> g_tls_cb;
 static std::shared_ptr<Botan::TLS::Client> g_tls_conn;
+static Config g_cfg; // loaded from zerotrace.conf at startup
 
 // -------------------------------------------------------
 // Received message — lives in memory until timer expires
@@ -136,12 +137,28 @@ static void send_line(int /*fd*/, const std::string& line) { tls_send_line(*g_tl
 
 static std::string read_line(int fd) { return tls_read_line(fd, *g_tls_conn, *g_tls_cb); }
 
+// TLS policy that honours tls_min_version from config
+class ClientTlsPolicy : public Botan::TLS::Policy {
+    bool allow_tls12_;
+public:
+    explicit ClientTlsPolicy(bool allow_tls12) : allow_tls12_(allow_tls12) {}
+    bool allow_tls12() const override { return allow_tls12_; }
+};
+
 static int connect_to_server(const std::string& ip)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    // Connection timeout via SO_RCVTIMEO / SO_SNDTIMEO
+    struct timeval tv;
+    tv.tv_sec  = g_cfg.connection_timeout_s;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(SERVER_PORT);
+    addr.sin_port   = htons(static_cast<uint16_t>(g_cfg.client_port));
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
     if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         close(fd);
@@ -152,12 +169,12 @@ static int connect_to_server(const std::string& ip)
     auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
     g_tls_cb = std::make_shared<ClientCallbacks>(fd);
     auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
-    auto creds = std::make_shared<ClientCredentials>();
-    auto policy = std::make_shared<Botan::TLS::Policy>();
+    auto creds       = std::make_shared<ClientCredentials>();
+    auto policy      = std::make_shared<ClientTlsPolicy>(g_cfg.tls_min_version == "1.2");
 
     g_tls_conn = std::make_shared<Botan::TLS::Client>(
         g_tls_cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng),
-        Botan::TLS::Server_Information(ip, SERVER_PORT));
+        Botan::TLS::Server_Information(ip, static_cast<uint16_t>(g_cfg.client_port)));
 
     // Drive the handshake by feeding raw bytes until TLS is active
     while (!g_tls_conn->is_active() && !g_tls_cb->closed) {
@@ -188,6 +205,30 @@ static int64_t now_unix()
 // -------------------------------------------------------
 // Register identity with server
 // -------------------------------------------------------
+// Parse "key=value" pairs out of the REGISTER OK response and validate
+// that the server's crypto config matches ours.
+static void check_server_crypto(const std::string& resp_tail)
+{
+    std::istringstream ss(resp_tail);
+    std::string tok;
+    while (ss >> tok) {
+        auto eq = tok.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = tok.substr(0, eq);
+        std::string val = tok.substr(eq + 1);
+        if (key == "kem"    && val != g_cfg.kem)
+            std::cerr << "\n[warning] server kem=" << val
+                      << " but client kem=" << g_cfg.kem
+                      << " — messages will fail to decrypt\n";
+        if (key == "cipher" && val != g_cfg.cipher)
+            std::cerr << "\n[warning] server cipher=" << val
+                      << " but client cipher=" << g_cfg.cipher << "\n";
+        if (key == "hash"   && val != g_cfg.hash)
+            std::cerr << "\n[warning] server hash=" << val
+                      << " but client hash=" << g_cfg.hash << "\n";
+    }
+}
+
 static bool do_register(int fd)
 {
     std::lock_guard<std::mutex> lock(socket_mutex);
@@ -195,7 +236,13 @@ static bool do_register(int fd)
     send_line(fd, "REGISTER " + identity.user_id + " " + pubkey_hex);
     std::string resp = read_line(fd);
     if (resp.substr(0, 3) == "OK ") {
-        session_token = resp.substr(3);
+        std::istringstream ss(resp.substr(3));
+        ss >> session_token; // first word is the token
+        // remaining words are key=value crypto params
+        std::string rest;
+        std::getline(ss >> std::ws, rest);
+        if (!rest.empty())
+            check_server_crypto(rest);
         return true;
     }
     return false;
@@ -227,7 +274,7 @@ static void do_send(int fd, const std::string& recipient_id, const std::string& 
             recipient_pub = get_pubkey_locked(fd, recipient_id);
         }
         // encrypt outside the lock — can be slow, no need to hold socket
-        blob = encrypt_message(text, identity.user_id, username_local, recipient_pub, rng);
+        blob = encrypt_message(text, identity.user_id, username_local, recipient_pub, rng, g_cfg);
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
             // include sender_id + token so server can authenticate the send
@@ -317,7 +364,7 @@ static void redraw_screen()
 static void poll_thread(std::string server_ip)
 {
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(POLL_INTERVAL_S));
+        std::this_thread::sleep_for(std::chrono::seconds(g_cfg.poll_interval_s));
 
         int fd = sock_fd.load();
         if (fd < 0)
@@ -348,7 +395,7 @@ static void poll_thread(std::string server_ip)
 
                 try {
                     auto blob = Botan::hex_decode(blob_hex);
-                    auto decrypted = decrypt_message(blob, *identity.priv_key, rng);
+                    auto decrypted = decrypt_message(blob, identity, rng, g_cfg);
 
                     if (!replay_guard.check_and_insert(decrypted.msg_nonce))
                         continue; // duplicate nonce — silently drop replay
@@ -384,7 +431,7 @@ static void display_thread()
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
 
-        int64_t cutoff = now_unix() - MSG_TTL_CLIENT_S;
+        int64_t cutoff = now_unix() - g_cfg.msg_ttl_s;
         std::lock_guard<std::mutex> lock(messages_mutex);
 
         // wipe any expired messages
@@ -433,13 +480,25 @@ static SecureString read_passphrase(const std::string& prompt)
 int main(int argc, char* argv[])
 {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <username> <server_ip>\n";
+        std::cerr << "Usage: " << argv[0] << " <username> <server_ip> [--config path]\n";
         std::cerr << "Example: " << argv[0] << " alice 127.0.0.1\n";
         return 1;
     }
 
     std::string username = argv[1];
     std::string server_ip = argv[2];
+
+    // Optional --config flag
+    std::string config_path = "zerotrace.conf";
+    for (int i = 3; i < argc - 1; ++i) {
+        if (std::string(argv[i]) == "--config")
+            config_path = argv[i + 1];
+    }
+    try {
+        g_cfg = Config::load(config_path);
+    } catch (...) {
+        // fall back to defaults if file missing or invalid
+    }
 
     // strip .enc extension if user passed a filename instead of a name
     if (username.size() > 4 && username.substr(username.size() - 4) == ".enc")
@@ -463,7 +522,7 @@ int main(int argc, char* argv[])
         check.close();
         auto pass = read_passphrase("Passphrase: ");
         try {
-            identity = load_identity(pass, identity_file);
+            identity = load_identity(pass, identity_file, g_cfg);
         } catch (...) {
             std::cerr << "Wrong passphrase or corrupt identity file.\n";
             return 1;
@@ -472,8 +531,8 @@ int main(int argc, char* argv[])
         check.close();
         std::cout << "No identity found for '" << username << "'. Creating new identity.\n";
         auto pass = read_passphrase("Set passphrase: ");
-        identity = generate_identity(rng);
-        save_identity(identity, pass, identity_file, rng);
+        identity = generate_identity(rng, g_cfg);
+        save_identity(identity, pass, identity_file, rng, g_cfg);
         chmod(identity_file.c_str(), 0600); // owner-read only
         std::cout << "Identity saved to " << identity_file << "\n";
     }
@@ -554,9 +613,9 @@ int main(int argc, char* argv[])
                     // guard against exceeding PADDED_PLAINTEXT_LEN
                     constexpr size_t fixed_overhead = MSG_NONCE_LEN + USER_ID_LEN + 1 + 2;
                     size_t name_bytes = std::min(username_local.size(), size_t(255));
-                    if (text.size() + fixed_overhead + name_bytes > PADDED_PLAINTEXT_LEN) {
+                    if (text.size() + fixed_overhead + name_bytes > g_cfg.padded_plaintext_bytes()) {
                         std::cout << "\n[message too long — max "
-                                  << (PADDED_PLAINTEXT_LEN - fixed_overhead - name_bytes)
+                                  << (g_cfg.padded_plaintext_bytes() - fixed_overhead - name_bytes)
                                   << " bytes]\n";
                     } else {
                         do_send(fd, resolved, text);

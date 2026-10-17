@@ -14,6 +14,7 @@
 #include <chrono>
 #include <iostream>
 #include <netinet/in.h>
+#include <sstream>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -84,6 +85,19 @@ static std::string tls_cmd(TlsConn& c, const std::string& line)
     return tls_read_line(c.fd, *c.tls, *c.cb);
 }
 static Botan::AutoSeeded_RNG rng;
+static Config g_cfg; // default config used by all tests
+
+// Extract the session token (first word after "OK ") from a REGISTER response.
+// The full response format is: OK <64hex-token> kem=X cipher=Y hash=Z pad=N
+static std::string extract_token(const std::string& resp)
+{
+    if (resp.size() < 3 || resp.substr(0, 3) != "OK ")
+        return "";
+    std::istringstream ss(resp.substr(3));
+    std::string tok;
+    ss >> tok;
+    return tok;
+}
 
 static int connect_test()
 {
@@ -166,7 +180,11 @@ int main()
     std::cout << "=== server tests ===\n\n";
 
     std::thread([] { start_server(TEST_PORT); }).detach();
-    std::thread([] { start_server_tls(TEST_TLS_PORT); }).detach();
+    std::thread([] {
+        Config tls_cfg;
+        tls_cfg.server_port = TEST_TLS_PORT;
+        start_server_tls(tls_cfg);
+    }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
     // -------------------------------------------------------
@@ -175,20 +193,20 @@ int main()
     TEST("REGISTER returns 64-char token for valid user");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string resp =
             cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
-        ASSERT_EQ(resp.substr(3).size(), (size_t)64);
+        ASSERT_EQ(extract_token(resp).size(), (size_t)64);
         close(fd);
     }
 
     TEST("REGISTER rejects user_id that does not match pubkey");
     {
         reset_server_state();
-        auto id1 = generate_identity(rng);
-        auto id2 = generate_identity(rng);
+        auto id1 = generate_identity(rng, g_cfg);
+        auto id2 = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string resp =
             cmd(fd, "REGISTER " + id1.user_id + " " + Botan::hex_encode(id2.pubkey_bytes));
@@ -199,7 +217,7 @@ int main()
     TEST("REGISTER allows same-key re-registration");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         std::string reg = "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes);
         int fd1 = connect_test();
         cmd(fd1, reg);
@@ -225,7 +243,7 @@ int main()
     TEST("GETKEY returns pubkey for registered user");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         int fd = connect_test();
         cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         std::string resp = cmd(fd, "GETKEY " + id.user_id);
@@ -249,12 +267,13 @@ int main()
     TEST("SEND rejects invalid token");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
         cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob = encrypt_message("hello", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        auto blob =
+            encrypt_message("hello", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string resp = cmd(fd, "SEND " + sender.user_id + " " + std::string(64, '0') + " " +
                                        recipient.user_id + " " + Botan::hex_encode(blob));
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
@@ -264,14 +283,14 @@ int main()
     TEST("SEND accepts authenticated message and returns OK");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob = encrypt_message("hello", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        auto blob =
+            encrypt_message("hello", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
                                        recipient.user_id + " " + Botan::hex_encode(blob));
         ASSERT_EQ(resp, std::string("OK"));
@@ -281,11 +300,10 @@ int main()
     TEST("SEND rejects unknown recipient");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         std::string resp =
             cmd(fd, "SEND " + sender.user_id + " " + s_tok + " 0000000000000000 AABB");
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
@@ -295,12 +313,11 @@ int main()
     TEST("SEND rejects blob exceeding MAX_BLOB_LEN");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
         std::vector<uint8_t> oversized(MAX_BLOB_LEN + 1, 0xAB);
         std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
@@ -312,12 +329,11 @@ int main()
     TEST("SEND accepts blob exactly at MAX_BLOB_LEN");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
         std::vector<uint8_t> max_blob(MAX_BLOB_LEN, 0xCD);
         std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
@@ -332,14 +348,14 @@ int main()
     TEST("SEND allows burst up to RATE_LIMIT_MSGS");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        auto blob =
+            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string blob_hex = Botan::hex_encode(blob);
         for (int i = 0; i < RATE_LIMIT_MSGS; ++i) {
             std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
@@ -352,14 +368,14 @@ int main()
     TEST("SEND rejects message after RATE_LIMIT_MSGS in window");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        auto blob =
+            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string blob_hex = Botan::hex_encode(blob);
         for (int i = 0; i < RATE_LIMIT_MSGS; ++i)
             cmd(fd,
@@ -376,10 +392,10 @@ int main()
     TEST("POLL returns NOMSG when inbox is empty");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string token =
-            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)).substr(3);
+        std::string token = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
         auto blobs = poll_all(fd, id.user_id, token);
         ASSERT_EQ(blobs.size(), (size_t)0);
         close(fd);
@@ -388,7 +404,7 @@ int main()
     TEST("POLL rejects invalid token");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         int fd = connect_test();
         cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         std::string resp = cmd(fd, "POLL " + id.user_id + " " + std::string(64, '0'));
@@ -399,17 +415,15 @@ int main()
     TEST("POLL delivers message and wipes inbox on receipt");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
-        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
-                                        Botan::hex_encode(recipient.pubkey_bytes))
-                                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
         auto blob = encrypt_message("secret message", sender.user_id, "sender",
-                                    recipient.pubkey_bytes, rng);
+                                    recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
 
@@ -426,24 +440,23 @@ int main()
     TEST("POLL delivered blob decrypts to original message");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
-        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
-                                        Botan::hex_encode(recipient.pubkey_bytes))
-                                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
         auto blob =
-            encrypt_message("end to end", sender.user_id, "alice", recipient.pubkey_bytes, rng);
+            encrypt_message("end to end", sender.user_id, "alice", recipient.pubkey_bytes, rng,
+                            g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
 
         auto blobs = poll_all(fd, recipient.user_id, r_tok);
         ASSERT_EQ(blobs.size(), (size_t)1);
 
-        auto dec = decrypt_message(blobs[0], *recipient.priv_key, rng);
+        auto dec = decrypt_message(blobs[0], recipient, rng, g_cfg);
         ASSERT_EQ(dec.plaintext, std::string("end to end"));
         ASSERT_EQ(dec.sender_id, sender.user_id);
         ASSERT_EQ(dec.sender_name, std::string("alice"));
@@ -456,16 +469,15 @@ int main()
     TEST("sender POLL returns ACK 1 after recipient polls");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
-        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
-                                        Botan::hex_encode(recipient.pubkey_bytes))
-                                .substr(3);
-        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+        auto blob =
+            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
         poll_all(fd, recipient.user_id, r_tok); // recipient collects — triggers ack
@@ -477,16 +489,15 @@ int main()
     TEST("ACK count matches number of messages delivered");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
-        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
-                                        Botan::hex_encode(recipient.pubkey_bytes))
-                                .substr(3);
-        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+        auto blob =
+            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string blob_hex = Botan::hex_encode(blob);
         for (int i = 0; i < 3; ++i)
             cmd(fd,
@@ -500,16 +511,15 @@ int main()
     TEST("ACK is consumed after first sender POLL");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
-        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
-                                        Botan::hex_encode(recipient.pubkey_bytes))
-                                .substr(3);
-        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+        auto blob =
+            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
         poll_all(fd, recipient.user_id, r_tok);
@@ -522,14 +532,14 @@ int main()
     TEST("sender POLL returns no ACK when message has not been delivered");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string s_tok =
-            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
-                .substr(3);
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        auto blob =
+            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
         // recipient has not polled — no ACK yet
@@ -544,30 +554,30 @@ int main()
     TEST("TLS REGISTER returns token");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         auto conn = tls_connect(TEST_TLS_PORT);
         ASSERT_TRUE(conn.fd >= 0);
         std::string resp =
             tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
-        ASSERT_EQ(resp.substr(3).size(), (size_t)64);
+        ASSERT_EQ(extract_token(resp).size(), (size_t)64);
         close(conn.fd);
     }
 
     TEST("TLS SEND and POLL deliver message end-to-end");
     {
         reset_server_state();
-        auto sender = generate_identity(rng);
-        auto recipient = generate_identity(rng);
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
         auto conn = tls_connect(TEST_TLS_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        std::string s_tok = tls_cmd(conn, "REGISTER " + sender.user_id + " " +
-                                              Botan::hex_encode(sender.pubkey_bytes))
-                                .substr(3);
-        std::string r_tok = tls_cmd(conn, "REGISTER " + recipient.user_id + " " +
-                                              Botan::hex_encode(recipient.pubkey_bytes))
-                                .substr(3);
-        auto blob = encrypt_message("tls hello", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string s_tok = extract_token(tls_cmd(conn, "REGISTER " + sender.user_id + " " +
+                                                             Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok =
+            extract_token(tls_cmd(conn, "REGISTER " + recipient.user_id + " " +
+                                            Botan::hex_encode(recipient.pubkey_bytes)));
+        auto blob =
+            encrypt_message("tls hello", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         tls_cmd(conn, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                           Botan::hex_encode(blob));
         // POLL recipient
@@ -581,7 +591,7 @@ int main()
     TEST("TLS connection with bad token is rejected");
     {
         reset_server_state();
-        auto id = generate_identity(rng);
+        auto id = generate_identity(rng, g_cfg);
         auto conn = tls_connect(TEST_TLS_PORT);
         ASSERT_TRUE(conn.fd >= 0);
         tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));

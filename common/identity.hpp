@@ -1,31 +1,35 @@
 #pragma once
+#include "config.hpp"
 #include "secure_memory.hpp"
 #include <botan/auto_rng.h>
-#include <botan/ml_kem.h>
+#include <botan/pk_keys.h>
 #include <memory>
 #include <string>
 #include <vector>
 
 struct Identity {
     std::string user_id;               // 16 hex chars, derived from pubkey
-    std::vector<uint8_t> pubkey_bytes; // 1184-byte ML-KEM-768 public key
+    std::vector<uint8_t> pubkey_bytes; // raw public key bytes (size depends on KEM)
 
-    // owning pointer — private key lives here, wiped on destruction
-    std::unique_ptr<Botan::ML_KEM_PrivateKey> priv_key;
+    // Primary private key. For classical/PQ: holds the single key.
+    // For hybrid: holds the ECDH key (classical component).
+    std::unique_ptr<Botan::Private_Key> priv_key;
+
+    // Secondary private key — non-null for hybrid modes only (holds the ML-KEM key).
+    std::unique_ptr<Botan::Private_Key> priv_key2;
 };
 
-// Generate a brand new identity (first launch)
-Identity generate_identity(Botan::AutoSeeded_RNG& rng);
-
-// Derive user ID from a public key — deterministic
+// Derive user ID from a public key — deterministic (SHA-256, first 8 bytes → 16 hex chars).
 std::string derive_user_id(const std::vector<uint8_t>& pubkey_bytes);
 
-// Save identity to file, encrypted with passphrase.
-// passphrase is held in mlocked memory — not swappable, zeroed on destruction.
-// Format: salt(16) + nonce(12) + encrypted_privkey(64-byte ML-KEM seed + 16 byte GCM tag)
-void save_identity(const Identity& id, const SecureString& passphrase, const std::string& path,
-                   Botan::AutoSeeded_RNG& rng);
+// Generate a brand new identity using the KEM specified in cfg.
+Identity generate_identity(Botan::AutoSeeded_RNG& rng, const Config& cfg);
 
-// Load identity from file — throws on wrong passphrase or corrupt file.
-// passphrase is held in mlocked memory — not swappable, zeroed on destruction.
-Identity load_identity(const SecureString& passphrase, const std::string& path);
+// Save identity to file, encrypted with passphrase using cfg passphrase KDF settings.
+// Format: salt(16) + nonce(12) + AES-256-GCM( raw_privkey_bytes [+ raw_privkey2_bytes] )
+void save_identity(const Identity& id, const SecureString& passphrase, const std::string& path,
+                   Botan::AutoSeeded_RNG& rng, const Config& cfg);
+
+// Load identity from file. Throws on wrong passphrase or corrupt file.
+Identity load_identity(const SecureString& passphrase, const std::string& path,
+                       const Config& cfg);

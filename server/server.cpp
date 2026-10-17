@@ -1,5 +1,4 @@
 // ZeroTraceMsg Server — core logic
-// Extracted from main.cpp so tests can link against it.
 
 #include "server.hpp"
 #include "../common/identity.hpp"
@@ -13,6 +12,7 @@
 #include <botan/ecdsa.h>
 #include <botan/hex.h>
 #include <botan/pkcs8.h>
+#include <botan/ed25519.h>
 #include <botan/tls_session_manager_noop.h>
 #include <botan/x509self.h>
 #include <chrono>
@@ -21,6 +21,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sstream>
 #include <string>
@@ -29,6 +30,49 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+// ── logging ──────────────────────────────────────────────────────────────────
+
+static int              g_log_level  = 1; // 0=debug 1=info 2=warn 3=error
+static bool             g_log_json   = false;
+static std::ofstream    g_log_file;
+static std::mutex       g_log_mutex;
+
+static void log_init(const Config& cfg)
+{
+    std::string lv = cfg.log_level;
+    if      (lv == "debug") g_log_level = 0;
+    else if (lv == "info")  g_log_level = 1;
+    else if (lv == "warn")  g_log_level = 2;
+    else                    g_log_level = 3; // error
+
+    g_log_json = (cfg.log_format == "json");
+
+    if (!cfg.log_file.empty()) {
+        g_log_file.open(cfg.log_file, std::ios::app);
+    }
+}
+
+static void log_msg(int level, const std::string& msg)
+{
+    if (level < g_log_level)
+        return;
+    std::lock_guard<std::mutex> lk(g_log_mutex);
+    std::ostream& out = g_log_file.is_open() ? g_log_file : std::cout;
+    if (g_log_json) {
+        static const char* labels[] = {"debug","info","warn","error"};
+        out << "{\"level\":\"" << labels[level] << "\",\"msg\":\"" << msg << "\"}\n";
+    } else {
+        out << msg << "\n";
+    }
+}
+
+#define LOG_DEBUG(m) log_msg(0, m)
+#define LOG_INFO(m)  log_msg(1, m)
+#define LOG_WARN(m)  log_msg(2, m)
+#define LOG_ERROR(m) log_msg(3, m)
+
+// ── server state ─────────────────────────────────────────────────────────────
 
 static bool ct_equal(const uint8_t* a, const uint8_t* b, size_t len)
 {
@@ -46,16 +90,20 @@ struct PendingMessage {
 };
 
 struct RateBucket {
-    int count{0};
+    int     count{0};
     int64_t window_start{0};
 };
 
-static std::map<std::string, std::vector<uint8_t>> pubkeys;
+struct SessionInfo {
+    std::string token;
+    int64_t     created_at;
+};
+
+static std::map<std::string, std::vector<uint8_t>>  pubkeys;
 static std::map<std::string, std::vector<PendingMessage>> messages;
-static std::map<std::string, std::string> tokens;
-static std::map<std::string, RateBucket> rate_buckets;
-static std::map<std::string, int>
-    delivery_acks; // sender_id → count of messages delivered to recipients
+static std::map<std::string, SessionInfo>           sessions;
+static std::map<std::string, RateBucket>            rate_buckets;
+static std::map<std::string, int>                   delivery_acks;
 static std::mutex store_mutex;
 
 static std::string new_message_id()
@@ -73,17 +121,15 @@ static int64_t now_unix()
         .count();
 }
 
-// -------------------------------------------------------
-// Protocol handler — I/O is injected via lambdas so the
-// same logic runs over both plain TCP (tests) and TLS.
-// -------------------------------------------------------
+// ── protocol handler ──────────────────────────────────────────────────────────
+
 using SendFn = std::function<void(const std::string&)>;
 using RecvFn = std::function<std::string()>;
 
-static void handle_client(int client_fd, SendFn sl, RecvFn rl)
+static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg)
 {
     Botan::AutoSeeded_RNG rng;
-    std::cout << "[CONNECT]  client connected (fd=" << client_fd << ")\n";
+    LOG_INFO("[CONNECT]  client connected (fd=" + std::to_string(client_fd) + ")");
 
     while (true) {
         std::string line = rl();
@@ -99,24 +145,45 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl)
             ss >> user_id >> pubkey_hex;
             try {
                 auto pubkey = Botan::hex_decode(pubkey_hex);
+
+                // Validate pubkey size against configured KEM
+                if (pubkey.size() != cfg.kem_pubkey_len()) {
+                    sl("ERR pubkey size mismatch for configured KEM");
+                    continue;
+                }
+
                 std::string expected_id = derive_user_id(pubkey);
                 if (expected_id != user_id) {
                     sl("ERR user_id does not match pubkey");
                     continue;
                 }
+
                 std::lock_guard<std::mutex> lock(store_mutex);
+
+                // max_users check (0 = unlimited)
+                if (cfg.max_users > 0 &&
+                    pubkeys.find(user_id) == pubkeys.end() &&
+                    static_cast<int>(pubkeys.size()) >= cfg.max_users) {
+                    sl("ERR server has reached maximum user capacity");
+                    continue;
+                }
+
                 auto existing = pubkeys.find(user_id);
                 if (existing != pubkeys.end() && existing->second != pubkey) {
                     sl("ERR user_id already registered with a different key");
                     continue;
                 }
+
                 auto token_bytes = rng.random_vec(32);
                 std::string token = Botan::hex_encode(token_bytes);
-                pubkeys[user_id] = pubkey;
-                tokens[user_id] = token;
-                sl("OK " + token);
-                std::cout << "[REGISTER] user=" << user_id << " total_users=" << pubkeys.size()
-                          << "\n";
+                pubkeys[user_id]  = pubkey;
+                sessions[user_id] = {token, now_unix()};
+
+                // Include active crypto params so the client can validate compatibility
+                sl("OK " + token + " kem=" + cfg.kem + " cipher=" + cfg.cipher +
+                   " hash=" + cfg.hash + " pad=" + std::to_string(cfg.padded_plaintext_kb));
+                LOG_INFO("[REGISTER] user=" + user_id +
+                         " total_users=" + std::to_string(pubkeys.size()));
             } catch (...) {
                 sl("ERR invalid pubkey");
             }
@@ -136,44 +203,68 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl)
             std::string sender_id, token, recipient_id, blob_hex;
             ss >> sender_id >> token >> recipient_id >> blob_hex;
             std::lock_guard<std::mutex> lock(store_mutex);
-            auto tok_it = tokens.find(sender_id);
-            bool sender_valid =
-                tok_it != tokens.end() && tok_it->second.size() == token.size() &&
-                ct_equal(reinterpret_cast<const uint8_t*>(tok_it->second.data()),
-                         reinterpret_cast<const uint8_t*>(token.data()), tok_it->second.size());
-            if (!sender_valid) {
+
+            // Token auth + session TTL
+            auto sess_it = sessions.find(sender_id);
+            bool token_ok = sess_it != sessions.end() &&
+                            sess_it->second.token.size() == token.size() &&
+                            ct_equal(
+                                reinterpret_cast<const uint8_t*>(sess_it->second.token.data()),
+                                reinterpret_cast<const uint8_t*>(token.data()),
+                                sess_it->second.token.size());
+
+            if (token_ok && cfg.session_ttl_hours > 0) {
+                int64_t age_h = (now_unix() - sess_it->second.created_at) / 3600;
+                if (age_h >= cfg.session_ttl_hours) {
+                    sessions.erase(sess_it);
+                    token_ok = false;
+                }
+            }
+
+            if (!token_ok) {
                 sl("ERR invalid token");
                 continue;
             }
+
+            // Rate limiting
             {
                 auto& bucket = rate_buckets[sender_id];
-                int64_t now = now_unix();
-                if (now - bucket.window_start >= RATE_LIMIT_WINDOW_S) {
-                    bucket.count = 0;
+                int64_t now  = now_unix();
+                if (now - bucket.window_start >= cfg.rate_limit_window_s) {
+                    bucket.count        = 0;
                     bucket.window_start = now;
                 }
-                if (bucket.count >= RATE_LIMIT_MSGS) {
+                if (bucket.count >= cfg.rate_limit_msgs) {
                     sl("ERR rate limit exceeded");
                     continue;
                 }
                 bucket.count++;
             }
+
             if (pubkeys.find(recipient_id) == pubkeys.end()) {
                 sl("ERR unknown recipient");
                 continue;
             }
+
+            // Max inbox check
+            auto& inbox = messages[recipient_id];
+            if (static_cast<int>(inbox.size()) >= cfg.max_inbox_messages) {
+                sl("ERR recipient inbox is full");
+                continue;
+            }
+
             try {
                 auto blob = Botan::hex_decode(blob_hex);
-                if (blob.size() > MAX_BLOB_LEN) {
+                if (blob.size() > cfg.max_blob_len()) {
                     sl("ERR blob too large");
                     continue;
                 }
                 std::string msg_id = new_message_id();
-                messages[recipient_id].push_back({msg_id, sender_id, blob, now_unix()});
+                inbox.push_back({msg_id, sender_id, blob, now_unix()});
                 sl("OK");
-                std::cout << "[SEND]     to=" << recipient_id << " msg_id=" << msg_id
-                          << " blob=" << blob.size() << " bytes"
-                          << " (server cannot read content)\n";
+                LOG_INFO("[SEND]     to=" + recipient_id + " msg_id=" + msg_id +
+                         " blob=" + std::to_string(blob.size()) +
+                         " bytes (server cannot read content)");
             } catch (...) {
                 sl("ERR invalid blob");
             }
@@ -182,16 +273,29 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl)
             std::string user_id, token;
             ss >> user_id >> token;
             std::lock_guard<std::mutex> lock(store_mutex);
-            auto tok_it = tokens.find(user_id);
-            bool token_valid =
-                tok_it != tokens.end() && tok_it->second.size() == token.size() &&
-                ct_equal(reinterpret_cast<const uint8_t*>(tok_it->second.data()),
-                         reinterpret_cast<const uint8_t*>(token.data()), tok_it->second.size());
-            if (!token_valid) {
+
+            auto sess_it = sessions.find(user_id);
+            bool token_ok = sess_it != sessions.end() &&
+                            sess_it->second.token.size() == token.size() &&
+                            ct_equal(
+                                reinterpret_cast<const uint8_t*>(sess_it->second.token.data()),
+                                reinterpret_cast<const uint8_t*>(token.data()),
+                                sess_it->second.token.size());
+
+            if (token_ok && cfg.session_ttl_hours > 0) {
+                int64_t age_h = (now_unix() - sess_it->second.created_at) / 3600;
+                if (age_h >= cfg.session_ttl_hours) {
+                    sessions.erase(sess_it);
+                    token_ok = false;
+                }
+            }
+
+            if (!token_ok) {
                 sl("ERR invalid token");
-                std::cout << "[POLL]     user=" << user_id << " -> REJECTED invalid token\n";
+                LOG_INFO("[POLL]     user=" + user_id + " -> REJECTED invalid token");
                 continue;
             }
+
             auto msg_it = messages.find(user_id);
             if (msg_it != messages.end() && !msg_it->second.empty()) {
                 size_t count = msg_it->second.size();
@@ -200,9 +304,10 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl)
                     delivery_acks[msg.sender_id]++;
                 }
                 msg_it->second.clear();
-                std::cout << "[POLL]     user=" << user_id << " -> delivered " << count
-                          << " message(s), wiped from store\n";
+                LOG_INFO("[POLL]     user=" + user_id + " -> delivered " +
+                         std::to_string(count) + " message(s), wiped from store");
             }
+
             auto ack_it = delivery_acks.find(user_id);
             if (ack_it != delivery_acks.end() && ack_it->second > 0) {
                 sl("ACK " + std::to_string(ack_it->second));
@@ -215,62 +320,71 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl)
         }
     }
 
-    std::cout << "[DISCONNECT] client disconnected (fd=" << client_fd << ")\n";
+    LOG_INFO("[DISCONNECT] client disconnected (fd=" + std::to_string(client_fd) + ")");
     close(client_fd);
 }
 
-static void cleanup_thread()
+// ── background cleanup ────────────────────────────────────────────────────────
+
+static void cleanup_thread(const Config& cfg)
 {
     while (true) {
-        std::this_thread::sleep_for(std::chrono::minutes(10));
-        int64_t cutoff = now_unix() - MSG_TTL_SERVER_S;
+        std::this_thread::sleep_for(
+            std::chrono::minutes(cfg.cleanup_interval_min));
+        int64_t msg_cutoff  = now_unix() - int64_t(cfg.msg_ttl_hours) * 3600;
+        int64_t sess_cutoff = (cfg.session_ttl_hours > 0)
+                                  ? now_unix() - int64_t(cfg.session_ttl_hours) * 3600
+                                  : 0;
         std::lock_guard<std::mutex> lock(store_mutex);
         for (auto& [uid, msgs] : messages) {
-            msgs.erase(
-                std::remove_if(msgs.begin(), msgs.end(),
-                               [cutoff](const PendingMessage& m) { return m.timestamp < cutoff; }),
-                msgs.end());
+            msgs.erase(std::remove_if(msgs.begin(), msgs.end(),
+                           [msg_cutoff](const PendingMessage& m) {
+                               return m.timestamp < msg_cutoff;
+                           }),
+                       msgs.end());
+        }
+        if (sess_cutoff > 0) {
+            for (auto it = sessions.begin(); it != sessions.end();) {
+                it = (it->second.created_at < sess_cutoff) ? sessions.erase(it) : ++it;
+            }
         }
     }
 }
 
-static int make_listening_socket(int port)
+// ── socket helper ─────────────────────────────────────────────────────────────
+
+static int make_listening_socket(int port, const std::string& bind_addr)
 {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("socket");
-        return -1;
-    }
+    if (server_fd < 0) { perror("socket"); return -1; }
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = bind_addr == "0.0.0.0"
+                               ? INADDR_ANY
+                               : inet_addr(bind_addr.c_str());
     addr.sin_port = htons(static_cast<uint16_t>(port));
     if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        perror("bind");
-        return -1;
+        perror("bind"); return -1;
     }
     listen(server_fd, 16);
     return server_fd;
 }
 
-// -------------------------------------------------------
-// Plain TCP server — used by the test suite
-// -------------------------------------------------------
+// ── plain TCP server (tests) ──────────────────────────────────────────────────
+
 void start_server(int port)
 {
-    int server_fd = make_listening_socket(port);
-    if (server_fd < 0)
-        return;
-    std::cout << "[*] Server listening on port " << port << " (plain TCP)\n";
-    std::thread(cleanup_thread).detach();
-
+    Config cfg; // default config
+    int server_fd = make_listening_socket(port, "0.0.0.0");
+    if (server_fd < 0) return;
+    LOG_INFO("[*] Server listening on port " + std::to_string(port) + " (plain TCP)");
+    std::thread([cfg]() { cleanup_thread(cfg); }).detach();
     while (true) {
         int cfd = accept(server_fd, nullptr, nullptr);
-        if (cfd < 0)
-            continue;
-        std::thread([cfd]() {
+        if (cfd < 0) continue;
+        std::thread([cfd, cfg]() {
             handle_client(
                 cfd,
                 [cfd](const std::string& s) {
@@ -281,113 +395,120 @@ void start_server(int port)
                     std::string line;
                     char c;
                     while (::recv(cfd, &c, 1, 0) > 0) {
-                        if (c == '\n')
-                            break;
-                        if (line.size() >= MAX_LINE_LEN)
-                            return std::string{};
+                        if (c == '\n') break;
+                        if (line.size() >= MAX_LINE_LEN) return std::string{};
                         line += c;
                     }
                     return line;
-                });
+                },
+                cfg);
         }).detach();
     }
 }
 
-// -------------------------------------------------------
-// TLS infrastructure — production server
-// -------------------------------------------------------
+// ── TLS server ────────────────────────────────────────────────────────────────
 
-class ServerCredentials : public Botan::Credentials_Manager
-{
+class ServerCredentials : public Botan::Credentials_Manager {
     Botan::X509_Certificate cert_;
     std::shared_ptr<Botan::Private_Key> key_;
-
-  public:
-    ServerCredentials(const std::string& cert_path, const std::string& key_path) : cert_(cert_path)
+public:
+    ServerCredentials(const std::string& cert_path, const std::string& key_path)
+        : cert_(cert_path)
     {
         Botan::DataSource_Stream key_src(key_path);
         key_.reset(Botan::PKCS8::load_key(key_src).release());
     }
-
-    std::vector<Botan::X509_Certificate>
-    find_cert_chain(const std::vector<std::string>&, const std::vector<Botan::AlgorithmIdentifier>&,
-                    const std::vector<Botan::X509_DN>&, const std::string& type,
-                    const std::string&) override
+    std::vector<Botan::X509_Certificate> find_cert_chain(
+        const std::vector<std::string>&, const std::vector<Botan::AlgorithmIdentifier>&,
+        const std::vector<Botan::X509_DN>&, const std::string& type,
+        const std::string&) override
     {
-        if (type == "tls-server")
-            return {cert_};
-        return {};
+        return type == "tls-server" ? std::vector{cert_} : std::vector<Botan::X509_Certificate>{};
     }
-
-    std::shared_ptr<Botan::Private_Key> private_key_for(const Botan::X509_Certificate&,
-                                                        const std::string& type,
-                                                        const std::string&) override
+    std::shared_ptr<Botan::Private_Key> private_key_for(
+        const Botan::X509_Certificate&, const std::string& type, const std::string&) override
     {
-        if (type == "tls-server")
-            return key_;
-        return nullptr;
+        return type == "tls-server" ? key_ : nullptr;
     }
 };
 
-static void ensure_server_cert(const std::string& key_path, const std::string& cert_path)
+// Custom TLS policy respecting configured minimum version
+class ServerTlsPolicy : public Botan::TLS::Policy {
+    bool allow_tls12_;
+public:
+    explicit ServerTlsPolicy(bool allow_tls12) : allow_tls12_(allow_tls12) {}
+    bool allow_tls12() const override { return allow_tls12_; }
+};
+
+static void ensure_server_cert(const Config& cfg)
 {
-    std::ifstream k(key_path), c(cert_path);
-    if (k.good() && c.good())
-        return;
+    std::ifstream k(cfg.key_path), c(cfg.cert_path);
+    if (k.good() && c.good()) return;
 
     Botan::AutoSeeded_RNG rng;
-    Botan::ECDSA_PrivateKey key(rng, Botan::EC_Group::from_name("secp256r1"));
+    std::unique_ptr<Botan::Private_Key> key;
+
+    if (cfg.cert_algorithm == "ECDSA-P384") {
+        key = std::make_unique<Botan::ECDSA_PrivateKey>(
+            rng, Botan::EC_Group::from_name("secp384r1"));
+    } else if (cfg.cert_algorithm == "Ed25519") {
+        key = std::make_unique<Botan::Ed25519_PrivateKey>(rng);
+    } else {
+        // ECDSA-P256 (default)
+        key = std::make_unique<Botan::ECDSA_PrivateKey>(
+            rng, Botan::EC_Group::from_name("secp256r1"));
+    }
 
     Botan::X509_Cert_Options opts;
     opts.common_name = "ZeroTraceMsg";
+    // validity window
     opts.not_before("20240101000000Z");
-    opts.not_after("20340101000000Z");
-    auto cert = Botan::X509::create_self_signed_cert(opts, key, "SHA-256", rng);
+    // approximate: add cert_validity_days
+    int year = 2024 + cfg.cert_validity_days / 365;
+    opts.not_after(std::to_string(year) + "0101000000Z");
 
-    std::ofstream kf(key_path);
-    kf << Botan::PKCS8::PEM_encode(key);
+    auto cert = Botan::X509::create_self_signed_cert(opts, *key, "SHA-256", rng);
 
-    std::ofstream cf(cert_path);
+    std::ofstream kf(cfg.key_path);
+    kf << Botan::PKCS8::PEM_encode(*key);
+    std::ofstream cf(cfg.cert_path);
     cf << cert.PEM_encode();
 
-    std::cout << "[TLS] Generated self-signed certificate: " << cert_path << "\n";
+    LOG_INFO("[TLS] Generated self-signed certificate: " + cfg.cert_path);
 }
 
-// -------------------------------------------------------
-// TLS server — production entrypoint
-// -------------------------------------------------------
-void start_server_tls(int port)
+void start_server_tls(const Config& cfg)
 {
+    log_init(cfg);
+
     mkdir("certs", 0700);
-    const std::string key_path = "certs/server.key.pem";
-    const std::string cert_path = "certs/server.cert.pem";
-    ensure_server_cert(key_path, cert_path);
+    ensure_server_cert(cfg);
 
-    auto creds = std::make_shared<ServerCredentials>(cert_path, key_path);
-    auto policy = std::make_shared<Botan::TLS::Policy>();
+    auto creds  = std::make_shared<ServerCredentials>(cfg.cert_path, cfg.key_path);
+    bool tls12  = (cfg.tls_min_version == "1.2");
+    auto policy = std::make_shared<ServerTlsPolicy>(tls12);
 
-    int server_fd = make_listening_socket(port);
-    if (server_fd < 0)
-        return;
-    std::cout << "[*] Server listening on port " << port << " (TLS)\n";
-    std::thread(cleanup_thread).detach();
+    int server_fd = make_listening_socket(cfg.server_port, cfg.server_bind);
+    if (server_fd < 0) return;
+    LOG_INFO("[*] Server listening on " + cfg.server_bind + ":" +
+             std::to_string(cfg.server_port) + " (TLS " + cfg.tls_min_version + "+)");
+    std::thread([cfg]() { cleanup_thread(cfg); }).detach();
 
     while (true) {
         int cfd = accept(server_fd, nullptr, nullptr);
-        if (cfd < 0)
-            continue;
-
-        std::thread([cfd, creds, policy]() {
-            auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
-            auto cb = std::make_shared<SocketTlsCallbacks>(cfd);
+        if (cfd < 0) continue;
+        std::thread([cfd, creds, policy, cfg]() {
+            auto rng         = std::make_shared<Botan::AutoSeeded_RNG>();
+            auto cb          = std::make_shared<SocketTlsCallbacks>(cfd);
             auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
-
-            auto tls = std::make_shared<Botan::TLS::Server>(
-                cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng));
-
+            auto tls         = std::make_shared<Botan::TLS::Server>(
+                cb, session_mgr, creds, policy,
+                std::shared_ptr<Botan::RandomNumberGenerator>(rng));
             handle_client(
-                cfd, [tls](const std::string& s) { tls_send_line(*tls, s); },
-                [cfd, tls, cb]() { return tls_read_line(cfd, *tls, *cb); });
+                cfd,
+                [tls](const std::string& s) { tls_send_line(*tls, s); },
+                [cfd, tls, cb]() { return tls_read_line(cfd, *tls, *cb); },
+                cfg);
         }).detach();
     }
 }
@@ -397,7 +518,7 @@ void reset_server_state()
     std::lock_guard<std::mutex> lock(store_mutex);
     pubkeys.clear();
     messages.clear();
-    tokens.clear();
+    sessions.clear();
     rate_buckets.clear();
     delivery_acks.clear();
 }
