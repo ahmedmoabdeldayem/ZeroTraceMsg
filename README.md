@@ -137,4 +137,4 @@ ZeroTraceMsg/
 - **Plaintext transport** — session tokens are exchanged over unencrypted TCP. A network observer can capture tokens and drain a user's inbox. TLS would fix this
 - **Unverified display names** — usernames are self-declared inside the encrypted payload; anyone can claim any name
 - **Contacts file is plaintext** — the `users/<name>.contacts` file stores ID-to-nickname mappings unencrypted; it leaks your social graph on a shared machine
-- **No message delivery confirmation** — the client always shows [sent] regardless of whether delivery succeeded, to avoid leaking whether a recipient exists
+- **Delivery confirmation is approximate** — `[delivered]` appears when the recipient's client polls and retrieves the message, not at the moment they read it

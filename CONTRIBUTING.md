@@ -72,5 +72,4 @@ git push origin hotfix/crash-on-empty-blob
 |--------|---------|
 | `feature/tls-transport` | Wrap server TCP in TLS — protects session tokens |
 | `feature/contacts-encryption` | Encrypt contacts file at rest |
-| `feature/delivery-confirmation` | Notify sender when message is retrieved |
 | `feature/post-quantum-keys` | Replace ECDH with ML-KEM for key exchange |

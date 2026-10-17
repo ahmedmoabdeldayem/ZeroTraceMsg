@@ -30,6 +30,7 @@ static bool ct_equal(const uint8_t* a, const uint8_t* b, size_t len)
 
 struct PendingMessage {
     std::string id;
+    std::string sender_id;
     std::vector<uint8_t> blob;
     int64_t timestamp;
 };
@@ -43,6 +44,8 @@ static std::map<std::string, std::vector<uint8_t>> pubkeys;
 static std::map<std::string, std::vector<PendingMessage>> messages;
 static std::map<std::string, std::string> tokens;
 static std::map<std::string, RateBucket> rate_buckets;
+static std::map<std::string, int>
+    delivery_acks; // sender_id → count of messages delivered to recipients
 static std::mutex store_mutex;
 
 static std::string new_message_id()
@@ -169,7 +172,7 @@ static void handle_client(int client_fd)
                     continue;
                 }
                 std::string msg_id = new_message_id();
-                messages[recipient_id].push_back({msg_id, blob, now_unix()});
+                messages[recipient_id].push_back({msg_id, sender_id, blob, now_unix()});
                 send_line(client_fd, "OK");
                 std::cout << "[SEND]     to=" << recipient_id << " msg_id=" << msg_id
                           << " blob=" << blob.size() << " bytes"
@@ -193,17 +196,22 @@ static void handle_client(int client_fd)
                 continue;
             }
             auto msg_it = messages.find(user_id);
-            if (msg_it == messages.end() || msg_it->second.empty()) {
-                send_line(client_fd, "NOMSG");
-                continue;
+            if (msg_it != messages.end() && !msg_it->second.empty()) {
+                size_t count = msg_it->second.size();
+                for (auto& msg : msg_it->second) {
+                    send_line(client_fd, "MSG " + msg.id + " " + Botan::hex_encode(msg.blob));
+                    delivery_acks[msg.sender_id]++;
+                }
+                msg_it->second.clear();
+                std::cout << "[POLL]     user=" << user_id << " -> delivered " << count
+                          << " message(s), wiped from store\n";
             }
-            size_t count = msg_it->second.size();
-            for (auto& msg : msg_it->second)
-                send_line(client_fd, "MSG " + msg.id + " " + Botan::hex_encode(msg.blob));
-            msg_it->second.clear();
+            auto ack_it = delivery_acks.find(user_id);
+            if (ack_it != delivery_acks.end() && ack_it->second > 0) {
+                send_line(client_fd, "ACK " + std::to_string(ack_it->second));
+                ack_it->second = 0;
+            }
             send_line(client_fd, "NOMSG");
-            std::cout << "[POLL]     user=" << user_id << " -> delivered " << count
-                      << " message(s), wiped from store\n";
 
         } else {
             send_line(client_fd, "ERR unknown command");
@@ -267,4 +275,5 @@ void reset_server_state()
     messages.clear();
     tokens.clear();
     rate_buckets.clear();
+    delivery_acks.clear();
 }

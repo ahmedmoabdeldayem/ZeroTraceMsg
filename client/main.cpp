@@ -42,11 +42,12 @@ static std::mutex messages_mutex;
 static Botan::AutoSeeded_RNG rng;
 static Identity identity;
 static std::atomic<int> sock_fd{-1};
-static std::string username_local;                  // chosen username, sealed in messages
-static std::string session_token;                   // issued by server on REGISTER
-static std::atomic<int64_t> sent_at{0};             // timestamp of last send, for 2s notification
-static std::mutex socket_mutex;                     // serializes all socket send/recv
-static std::map<std::string, std::string> contacts; // id → nickname
+static std::string username_local;                      // chosen username, sealed in messages
+static std::string session_token;                       // issued by server on REGISTER
+static std::atomic<int64_t> sent_at{0};                 // timestamp of last send
+static std::atomic<int64_t> delivered_at{0};            // timestamp of last delivery confirmation
+static std::mutex socket_mutex;                         // serializes all socket send/recv
+static std::map<std::string, std::string> contacts;     // id → nickname
 static std::map<std::string, std::string> contacts_rev; // nickname → id
 static std::string contacts_file;
 static ReplayGuard replay_guard;
@@ -233,9 +234,15 @@ static void redraw_screen_locked()
     std::cout << "\033[2K" << "─────────────────────────\n\n";
     lines += 2;
 
-    if (now_unix() - sent_at.load() < 2) {
-        std::cout << "\033[2K" << "[sent]\n\n";
-        lines += 2;
+    {
+        int64_t now = now_unix();
+        if (now - delivered_at.load() < 5) {
+            std::cout << "\033[2K[delivered]\n\n";
+            lines += 2;
+        } else if (now - sent_at.load() < 2) {
+            std::cout << "\033[2K[sent]\n\n";
+            lines += 2;
+        }
     }
 
     for (const auto& msg : live_messages) {
@@ -286,7 +293,11 @@ static void poll_thread(std::string server_ip)
                 std::string line = read_line(fd);
                 if (line == "NOMSG" || line.empty())
                     break;
-                received_lines.push_back(line);
+                if (line.substr(0, 4) == "ACK ") {
+                    delivered_at.store(now_unix());
+                } else {
+                    received_lines.push_back(line);
+                }
             }
         }
 
