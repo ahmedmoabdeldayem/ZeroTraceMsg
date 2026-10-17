@@ -78,6 +78,23 @@ static std::vector<std::vector<uint8_t>> poll_all(int fd, const std::string& use
     return blobs;
 }
 
+// Poll and return the ACK count (0 if no ACK line present).
+static int poll_ack(int fd, const std::string& user_id, const std::string& token)
+{
+    send_line(fd, "POLL " + user_id + " " + token);
+    int ack = 0;
+    while (true) {
+        std::string line = read_line(fd);
+        if (line == "NOMSG" || line.empty())
+            break;
+        if (line.substr(0, 4) == "ACK ") {
+            std::istringstream ss(line.substr(4));
+            ss >> ack;
+        }
+    }
+    return ack;
+}
+
 int main()
 {
     SUITE_INIT("test_server");
@@ -364,6 +381,94 @@ int main()
         ASSERT_EQ(dec.plaintext, std::string("end to end"));
         ASSERT_EQ(dec.sender_id, sender.user_id);
         ASSERT_EQ(dec.sender_name, std::string("alice"));
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Delivery confirmation
+    // -------------------------------------------------------
+    TEST("sender POLL returns ACK 1 after recipient polls");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                        Botan::hex_encode(recipient.pubkey_bytes))
+                                .substr(3);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+        poll_all(fd, recipient.user_id, r_tok); // recipient collects — triggers ack
+        int ack = poll_ack(fd, sender.user_id, s_tok);
+        ASSERT_EQ(ack, 1);
+        close(fd);
+    }
+
+    TEST("ACK count matches number of messages delivered");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                        Botan::hex_encode(recipient.pubkey_bytes))
+                                .substr(3);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        std::string blob_hex = Botan::hex_encode(blob);
+        for (int i = 0; i < 3; ++i)
+            cmd(fd,
+                "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " + blob_hex);
+        poll_all(fd, recipient.user_id, r_tok);
+        int ack = poll_ack(fd, sender.user_id, s_tok);
+        ASSERT_EQ(ack, 3);
+        close(fd);
+    }
+
+    TEST("ACK is consumed after first sender POLL");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        std::string r_tok = cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                        Botan::hex_encode(recipient.pubkey_bytes))
+                                .substr(3);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+        poll_all(fd, recipient.user_id, r_tok);
+        poll_ack(fd, sender.user_id, s_tok);            // first poll — consumes ACK
+        int ack2 = poll_ack(fd, sender.user_id, s_tok); // second poll — no ACK
+        ASSERT_EQ(ack2, 0);
+        close(fd);
+    }
+
+    TEST("sender POLL returns no ACK when message has not been delivered");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        int fd = connect_test();
+        std::string s_tok =
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes))
+                .substr(3);
+        cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+        // recipient has not polled — no ACK yet
+        int ack = poll_ack(fd, sender.user_id, s_tok);
+        ASSERT_EQ(ack, 0);
         close(fd);
     }
 
