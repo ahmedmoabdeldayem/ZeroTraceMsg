@@ -8,8 +8,6 @@
 #include <span>
 #include <stdexcept>
 
-static Botan::EC_Group p256() { return Botan::EC_Group::from_name("secp256r1"); }
-
 std::string derive_user_id(const std::vector<uint8_t>& pubkey_bytes)
 {
     auto sha256 = Botan::HashFunction::create_or_throw("SHA-256");
@@ -21,7 +19,7 @@ std::string derive_user_id(const std::vector<uint8_t>& pubkey_bytes)
 Identity generate_identity(Botan::AutoSeeded_RNG& rng)
 {
     Identity id;
-    id.priv_key = std::make_unique<Botan::ECDH_PrivateKey>(rng, p256());
+    id.priv_key = std::make_unique<Botan::ML_KEM_PrivateKey>(rng, Botan::KyberMode::ML_KEM_768);
     id.pubkey_bytes = id.priv_key->raw_public_key_bits();
     id.user_id = derive_user_id(id.pubkey_bytes);
     return id;
@@ -48,7 +46,7 @@ void save_identity(const Identity& id, const SecureString& passphrase, const std
     auto aes_key =
         kdf_from_passphrase(passphrase, std::span<const uint8_t>(salt.data(), salt.size()));
 
-    auto raw_priv = id.priv_key->raw_private_key_bits();
+    auto raw_priv = id.priv_key->raw_private_key_bits(); // 64-byte ML-KEM seed
 
     auto enc = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
     enc->set_key(aes_key);
@@ -87,12 +85,10 @@ Identity load_identity(const SecureString& passphrase, const std::string& path)
     dec->start(nonce);
     dec->finish(ciphertext); // throws Botan::Invalid_Authentication_Tag on wrong passphrase
 
+    // reconstruct ML-KEM-768 private key from 64-byte seed
     Identity id;
-    auto scalar_opt = Botan::EC_Scalar::deserialize(
-        p256(), std::span<const uint8_t>(ciphertext.data(), ciphertext.size()));
-    if (!scalar_opt)
-        throw std::runtime_error("Invalid private key in identity file");
-    id.priv_key = std::make_unique<Botan::ECDH_PrivateKey>(p256(), *scalar_opt);
+    id.priv_key = std::make_unique<Botan::ML_KEM_PrivateKey>(std::span<const uint8_t>(ciphertext),
+                                                             Botan::KyberMode::ML_KEM_768);
     id.pubkey_bytes = id.priv_key->raw_public_key_bits();
     id.user_id = derive_user_id(id.pubkey_bytes);
     return id;

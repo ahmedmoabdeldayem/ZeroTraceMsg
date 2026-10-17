@@ -72,11 +72,11 @@ int main()
     // -------------------------------------------------------
     // Blob structure
     // -------------------------------------------------------
-    TEST("blob starts with 65-byte ephemeral pubkey");
+    TEST("blob is MAX_BLOB_LEN bytes and starts with KEM ciphertext");
     {
         auto blob = encrypt_message("test", sender.user_id, "alice", recipient.pubkey_bytes, rng);
-        ASSERT_GT(blob.size(), (size_t)65);
-        ASSERT_EQ(blob[0], 0x04); // uncompressed P-256 point prefix
+        ASSERT_EQ(blob.size(),
+                  MAX_BLOB_LEN); // KEM_CIPHERTEXT_LEN + PADDED_PLAINTEXT_LEN + GCM_TAG_LEN
     }
 
     TEST("same plaintext produces different ciphertext each time (ephemeral key)");

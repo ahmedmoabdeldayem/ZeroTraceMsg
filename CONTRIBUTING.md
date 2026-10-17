@@ -71,4 +71,3 @@ git push origin hotfix/crash-on-empty-blob
 | Branch | Feature |
 |--------|---------|
 | `feature/contacts-encryption` | Encrypt contacts file at rest |
-| `feature/post-quantum-keys` | Replace ECDH with ML-KEM for key exchange |

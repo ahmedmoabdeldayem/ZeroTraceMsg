@@ -1,6 +1,6 @@
 #pragma once
 #include <botan/auto_rng.h>
-#include <botan/ecdh.h>
+#include <botan/ml_kem.h>
 #include <string>
 #include <vector>
 
@@ -11,18 +11,19 @@ struct DecryptedMessage {
     std::string plaintext;
 };
 
-// Encrypt plaintext to recipient's public key.
+// Encrypt plaintext to recipient's ML-KEM-768 public key.
 // Sender ID and username are sealed inside — server never sees them.
 //
-// Blob format: ephemeral_pub(65) + ciphertext+tag
-// AES nonce is derived via HKDF (not stored — unique per message via ephemeral key)
-// Plaintext layout: msg_nonce(16) + sender_id(16) + name_len(1) + sender_name + message
+// Blob format: kem_ciphertext(1088) + aes_ciphertext+tag
+// Shared secret derived via ML-KEM encapsulation; AES key via HKDF on that secret.
+// Plaintext layout: msg_nonce(16) + sender_id(16) + name_len(1) + sender_name + msg_len(2) +
+// message + padding
 std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::string& sender_id,
                                      const std::string& sender_name,
                                      const std::vector<uint8_t>& recipient_pubkey,
                                      Botan::AutoSeeded_RNG& rng);
 
-// Decrypt a blob using recipient's private key.
+// Decrypt a blob using recipient's ML-KEM-768 private key.
 DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
-                                 const Botan::ECDH_PrivateKey& priv_key,
+                                 const Botan::ML_KEM_PrivateKey& priv_key,
                                  Botan::AutoSeeded_RNG& rng);
