@@ -9,6 +9,7 @@
 #include <atomic>
 #include <botan/auto_rng.h>
 #include <botan/data_src.h>
+#include <botan/ec_group.h>
 #include <botan/ecdsa.h>
 #include <botan/hex.h>
 #include <botan/pkcs8.h>

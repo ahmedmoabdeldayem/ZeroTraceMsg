@@ -1,7 +1,6 @@
 #include "crypto.hpp"
 #include "protocol.hpp"
 #include <botan/aead.h>
-#include <botan/ec_group.h>
 #include <botan/hex.h>
 #include <botan/kdf.h>
 #include <botan/pubkey.h>
@@ -12,29 +11,26 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
                                      const std::vector<uint8_t>& recipient_pubkey,
                                      Botan::AutoSeeded_RNG& rng)
 {
-    auto group = Botan::EC_Group::from_name("secp256r1");
+    // Step 1 — load recipient's ML-KEM-768 public key and encapsulate a shared secret
+    Botan::ML_KEM_PublicKey pub_key(recipient_pubkey, Botan::KyberMode::ML_KEM_768);
+    Botan::PK_KEM_Encryptor kem_enc(pub_key, "Raw");
+    auto kem = kem_enc.encrypt(rng, 32); // 32-byte shared secret, 1088-byte encapsulated key
+    const auto& kem_ct = kem.encapsulated_shared_key(); // 1088 bytes
+    const auto& shared_raw = kem.shared_key();          // 32 bytes
 
-    // Step 1 — fresh ephemeral key pair (discarded after this function returns)
-    Botan::ECDH_PrivateKey ephemeral(rng, group);
-    auto ephemeral_pub_bytes = ephemeral.raw_public_key_bits();
-
-    // Step 2 — ECDH shared secret
-    Botan::PK_Key_Agreement ecdh(ephemeral, rng, "Raw");
-    Botan::SymmetricKey shared = ecdh.derive_key(32, recipient_pubkey);
-
-    // Step 3 — HKDF: ephemeral pubkey used as salt to bind derivation to this message
+    // Step 2 — HKDF: use kem_ct as salt to bind key derivation to this encapsulation
     auto hkdf_extract = Botan::KDF::create_or_throw("HKDF-Extract(SHA-256)");
     auto hkdf_expand = Botan::KDF::create_or_throw("HKDF-Expand(SHA-256)");
 
     Botan::secure_vector<uint8_t> prk =
-        hkdf_extract->derive_key(32, shared.bits_of(), ephemeral_pub_bytes, std::vector<uint8_t>{});
+        hkdf_extract->derive_key(32, shared_raw, kem_ct, std::vector<uint8_t>{});
 
     auto aes_key_bytes = hkdf_expand->derive_key(
         32, prk, std::vector<uint8_t>{}, std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
     auto nonce_bytes = hkdf_expand->derive_key(12, prk, std::vector<uint8_t>{},
                                                std::vector<uint8_t>{'a', 'e', 's', '-', 'i', 'v'});
 
-    // Step 4 — assemble and pad plaintext payload:
+    // Step 3 — assemble and pad plaintext payload:
     //   msg_nonce(16) + sender_id(16) + name_len(1) + sender_name
     //   + msg_len(2, big-endian) + message + zero padding → fixed PADDED_PLAINTEXT_LEN
     auto nonce_raw = rng.random_vec(MSG_NONCE_LEN);
@@ -57,41 +53,41 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     payload.insert(payload.end(), plaintext.begin(), plaintext.end());
     payload.resize(PADDED_PLAINTEXT_LEN, 0); // zero-pad to fixed size
 
-    // Step 5 — AES-256-GCM encrypt
+    // Step 4 — AES-256-GCM encrypt
     auto aead = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
     aead->set_key(Botan::SymmetricKey(aes_key_bytes));
     aead->start(nonce_bytes);
     aead->finish(payload);
 
-    // Step 6 — blob: ephemeral_pub(65) + ciphertext+tag (always MAX_BLOB_LEN bytes)
-    // HKDF nonce not stored — re-derived from ephemeral pubkey on decrypt
+    // Step 5 — blob: kem_ciphertext(1088) + ciphertext+tag (always MAX_BLOB_LEN bytes)
     std::vector<uint8_t> blob;
-    blob.insert(blob.end(), ephemeral_pub_bytes.begin(), ephemeral_pub_bytes.end());
+    blob.insert(blob.end(), kem_ct.begin(), kem_ct.end());
     blob.insert(blob.end(), payload.begin(), payload.end());
 
     return blob;
 }
 
 DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
-                                 const Botan::ECDH_PrivateKey& priv_key, Botan::AutoSeeded_RNG& rng)
+                                 const Botan::ML_KEM_PrivateKey& priv_key,
+                                 Botan::AutoSeeded_RNG& rng)
 {
-    if (blob.size() != PUBKEY_LEN + PADDED_PLAINTEXT_LEN + GCM_TAG_LEN)
+    if (blob.size() != KEM_CIPHERTEXT_LEN + PADDED_PLAINTEXT_LEN + GCM_TAG_LEN)
         throw std::runtime_error("Blob size mismatch");
 
-    // Step 1 — parse blob
-    std::vector<uint8_t> ephemeral_pub(blob.begin(), blob.begin() + 65);
-    Botan::secure_vector<uint8_t> ciphertext(blob.begin() + 65, blob.end());
+    // Step 1 — split blob into KEM ciphertext and AES ciphertext
+    std::vector<uint8_t> kem_ct(blob.begin(), blob.begin() + KEM_CIPHERTEXT_LEN);
+    Botan::secure_vector<uint8_t> ciphertext(blob.begin() + KEM_CIPHERTEXT_LEN, blob.end());
 
-    // Step 2 — ECDH shared secret
-    Botan::PK_Key_Agreement ecdh(priv_key, rng, "Raw");
-    Botan::SymmetricKey shared = ecdh.derive_key(32, ephemeral_pub);
+    // Step 2 — ML-KEM decapsulation: recover shared secret
+    Botan::PK_KEM_Decryptor kem_dec(priv_key, rng, "Raw");
+    auto shared_raw = kem_dec.decrypt(std::span<const uint8_t>(kem_ct), 32);
 
-    // Step 3 — HKDF: same derivation as encrypt side — ephemeral pubkey as salt
+    // Step 3 — HKDF: same derivation as encrypt side
     auto hkdf_extract = Botan::KDF::create_or_throw("HKDF-Extract(SHA-256)");
     auto hkdf_expand = Botan::KDF::create_or_throw("HKDF-Expand(SHA-256)");
 
     Botan::secure_vector<uint8_t> prk =
-        hkdf_extract->derive_key(32, shared.bits_of(), ephemeral_pub, std::vector<uint8_t>{});
+        hkdf_extract->derive_key(32, shared_raw, kem_ct, std::vector<uint8_t>{});
 
     auto aes_key_bytes = hkdf_expand->derive_key(
         32, prk, std::vector<uint8_t>{}, std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});

@@ -12,14 +12,19 @@ static constexpr int MSG_TTL_SERVER_S = 172800; // server deletes after 48 hours
 
 // Sizes
 static constexpr size_t USER_ID_LEN = 16;   // 16 hex chars (8 bytes of SHA-256)
-static constexpr size_t PUBKEY_LEN = 65;    // uncompressed P-256 public key
 static constexpr size_t MSG_NONCE_LEN = 16; // random nonce sealed in payload for replay detection
 static constexpr size_t MAX_LINE_LEN = 1024 * 1024; // 1 MB max line length
+
+// ML-KEM-768 (post-quantum key encapsulation — replaces ECDH)
+static constexpr size_t ML_KEM_PUBKEY_LEN = 1184;  // ML-KEM-768 public key
+static constexpr size_t KEM_CIPHERTEXT_LEN = 1088; // ML-KEM-768 encapsulated key (blob prefix)
+
 // Message padding — all plaintexts are padded to this fixed size before encryption
 // so the server cannot infer message length from blob size.
 static constexpr size_t PADDED_PLAINTEXT_LEN = 4 * 1024; // 4 KB fixed plaintext
 static constexpr size_t GCM_TAG_LEN = 16;                // AES-256-GCM authentication tag
-static constexpr size_t MAX_BLOB_LEN = PUBKEY_LEN + PADDED_PLAINTEXT_LEN + GCM_TAG_LEN; // 4177 B
+static constexpr size_t MAX_BLOB_LEN =
+    KEM_CIPHERTEXT_LEN + PADDED_PLAINTEXT_LEN + GCM_TAG_LEN; // 5200 B
 
 // Rate limiting
 static constexpr int RATE_LIMIT_MSGS = 20;     // max messages per user per window

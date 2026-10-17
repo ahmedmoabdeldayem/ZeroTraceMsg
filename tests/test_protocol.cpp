@@ -19,8 +19,11 @@ int main()
     TEST("USER_ID_LEN is 16");
     ASSERT_EQ(USER_ID_LEN, (size_t)16);
 
-    TEST("PUBKEY_LEN is 65");
-    ASSERT_EQ(PUBKEY_LEN, (size_t)65);
+    TEST("ML_KEM_PUBKEY_LEN is 1184");
+    ASSERT_EQ(ML_KEM_PUBKEY_LEN, (size_t)1184);
+
+    TEST("KEM_CIPHERTEXT_LEN is 1088");
+    ASSERT_EQ(KEM_CIPHERTEXT_LEN, (size_t)1088);
 
     TEST("MSG_TTL_CLIENT_S is 120 seconds");
     ASSERT_EQ(MSG_TTL_CLIENT_S, 120);

@@ -8,9 +8,9 @@ Messages are end-to-end encrypted and auto-delete after the recipient reads them
 
 ## Security Properties
 
-- **End-to-end encrypted** — hybrid encryption (ECDH + HKDF + AES-256-GCM) per message
+- **End-to-end encrypted** — hybrid encryption (ML-KEM-768 + HKDF + AES-256-GCM) per message; quantum-resistant key encapsulation
 - **Sealed sender** — sender identity is encrypted inside the message; server only knows the recipient
-- **Ephemeral keys** — a fresh key pair is generated for every message and immediately discarded
+- **Ephemeral encapsulation** — a fresh ML-KEM ciphertext is generated for every message; the shared secret is never reused
 - **Replay protection** — each message carries a random 16-byte nonce sealed inside the ciphertext; the client tracks seen nonces and silently drops any blob it has already delivered
 - **Auto-delete** — messages are wiped from the client after 2 minutes and from the server after 48 hours if unread
 - **Anonymous identity** — user ID is derived from a public key hash, no name or phone number required
@@ -114,7 +114,7 @@ Your user ID is shown at the top of the screen when you connect. Share it with t
 ```
 ZeroTraceMsg/
 ├── common/
-│   ├── crypto.hpp/cpp         Hybrid encryption (ECDH + HKDF + AES-256-GCM)
+│   ├── crypto.hpp/cpp         Hybrid encryption (ML-KEM-768 + HKDF + AES-256-GCM)
 │   ├── identity.hpp/cpp       Key generation, save/load, user ID derivation
 │   ├── protocol.hpp           Shared constants (port, limits, wire format)
 │   ├── replay.hpp             Replay-nonce tracking (in-memory seen set)

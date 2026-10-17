@@ -49,11 +49,10 @@ int main()
         ASSERT_EQ(id.user_id, computed);
     }
 
-    TEST("pubkey is 65 bytes (uncompressed P-256)");
+    TEST("pubkey is 1184 bytes (ML-KEM-768)");
     {
         auto id = generate_identity(rng);
-        ASSERT_EQ(id.pubkey_bytes.size(), PUBKEY_LEN);
-        ASSERT_EQ(id.pubkey_bytes[0], 0x04); // uncompressed point prefix
+        ASSERT_EQ(id.pubkey_bytes.size(), ML_KEM_PUBKEY_LEN);
     }
 
     // -------------------------------------------------------
