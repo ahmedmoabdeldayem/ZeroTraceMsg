@@ -7,6 +7,7 @@
 #include "../common/protocol.hpp"
 #include "../common/replay.hpp"
 #include "../common/secure_memory.hpp"
+#include "../common/tls_utils.hpp"
 #include <arpa/inet.h>
 #include <atomic>
 #include <botan/auto_rng.h>
@@ -25,6 +26,31 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+// -------------------------------------------------------
+// TLS client — accepts any server certificate (self-signed).
+// A production deployment should pin the server's cert fingerprint here.
+// -------------------------------------------------------
+class ClientCallbacks : public SocketTlsCallbacks
+{
+  public:
+    explicit ClientCallbacks(int fd) : SocketTlsCallbacks(fd) {}
+
+    void tls_verify_cert_chain(const std::vector<Botan::X509_Certificate>&,
+                               const std::vector<std::optional<Botan::OCSP::Response>>&,
+                               const std::vector<Botan::Certificate_Store*>&, Botan::Usage_Type,
+                               std::string_view, const Botan::TLS::Policy&) override
+    { /* accept any cert — see Known Limitations */
+    }
+};
+
+class ClientCredentials : public Botan::Credentials_Manager
+{
+    // No client certificate; all methods use base-class defaults (empty chains, no keys).
+};
+
+static std::shared_ptr<ClientCallbacks> g_tls_cb;
+static std::shared_ptr<Botan::TLS::Client> g_tls_conn;
 
 // -------------------------------------------------------
 // Received message — lives in memory until timer expires
@@ -104,27 +130,11 @@ static std::string display_name(const std::string& id)
 }
 
 // -------------------------------------------------------
-// Socket helpers
+// Socket helpers — route all I/O through the TLS channel
 // -------------------------------------------------------
-static void send_line(int fd, const std::string& line)
-{
-    std::string msg = line + "\n";
-    send(fd, msg.data(), msg.size(), 0);
-}
+static void send_line(int /*fd*/, const std::string& line) { tls_send_line(*g_tls_conn, line); }
 
-static std::string read_line(int fd)
-{
-    std::string line;
-    char c;
-    while (recv(fd, &c, 1, 0) > 0) {
-        if (c == '\n')
-            break;
-        if (line.size() >= MAX_LINE_LEN)
-            return ""; // too long — signal disconnect
-        line += c;
-    }
-    return line;
-}
+static std::string read_line(int fd) { return tls_read_line(fd, *g_tls_conn, *g_tls_cb); }
 
 static int connect_to_server(const std::string& ip)
 {
@@ -137,6 +147,34 @@ static int connect_to_server(const std::string& ip)
         close(fd);
         return -1;
     }
+
+    // Establish TLS over the connected socket
+    auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
+    g_tls_cb = std::make_shared<ClientCallbacks>(fd);
+    auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
+    auto creds = std::make_shared<ClientCredentials>();
+    auto policy = std::make_shared<Botan::TLS::Policy>();
+
+    g_tls_conn = std::make_shared<Botan::TLS::Client>(
+        g_tls_cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng),
+        Botan::TLS::Server_Information(ip, SERVER_PORT));
+
+    // Drive the handshake by feeding raw bytes until TLS is active
+    while (!g_tls_conn->is_active() && !g_tls_cb->closed) {
+        uint8_t buf[4096];
+        ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            close(fd);
+            return -1;
+        }
+        g_tls_conn->received_data({buf, static_cast<size_t>(n)});
+    }
+
+    if (!g_tls_conn->is_active()) {
+        close(fd);
+        return -1;
+    }
+
     return fd;
 }
 

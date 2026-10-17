@@ -17,6 +17,7 @@ Messages are end-to-end encrypted and auto-delete after the recipient reads them
 - **Session tokens** — server issues a random token on registration; no passwords stored server-side
 - **Memory locking** — key material is locked in RAM with `mlock()` to prevent the OS from swapping it to disk
 - **Fixed-size blobs** — all messages are padded to a fixed 4 KB plaintext before encryption; the server cannot infer message length from blob size
+- **TLS transport** — the TCP connection is wrapped in TLS; session tokens, recipient IDs, and message timing are hidden from network observers
 
 ---
 
@@ -134,7 +135,7 @@ ZeroTraceMsg/
 ## Known Limitations
 
 - **IP visibility** — the server sees client IP addresses and recipient user IDs. Use a VPN or Tor to hide network identity
-- **Plaintext transport** — session tokens are exchanged over unencrypted TCP. A network observer can capture tokens and drain a user's inbox. TLS would fix this
+- **TLS certificate not pinned** — the client accepts any self-signed certificate, so a network attacker could MITM the TLS connection. Pin `certs/server.cert.pem` for production use
 - **Unverified display names** — usernames are self-declared inside the encrypted payload; anyone can claim any name
 - **Contacts file is plaintext** — the `users/<name>.contacts` file stores ID-to-nickname mappings unencrypted; it leaks your social graph on a shared machine
 - **Delivery confirmation is approximate** — `[delivered]` appears when the recipient's client polls and retrieves the message, not at the moment they read it
