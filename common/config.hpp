@@ -118,6 +118,13 @@ struct Config {
         throw std::invalid_argument("Unknown cipher: " + cipher);
     }
 
+    // Key length (bytes) required by the configured cipher.
+    size_t botan_key_len() const
+    {
+        if (cipher == "AES-128-GCM") return 16;
+        return 32; // AES-256-GCM and ChaCha20Poly1305 both use 32-byte keys
+    }
+
     // Botan hash name for the configured hash.
     std::string botan_hash() const
     {

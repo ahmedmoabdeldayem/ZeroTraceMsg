@@ -25,7 +25,8 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
         hkdf_ext->derive_key(32, kem.shared_secret, kem.ciphertext, std::vector<uint8_t>{});
 
     auto aes_key_bytes = hkdf_exp->derive_key(
-        32, prk, std::vector<uint8_t>{}, std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
+        cfg.botan_key_len(), prk, std::vector<uint8_t>{},
+        std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
     auto nonce_bytes = hkdf_exp->derive_key(12, prk, std::vector<uint8_t>{},
                                             std::vector<uint8_t>{'a', 'e', 's', '-', 'i', 'v'});
 
@@ -92,7 +93,8 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
         hkdf_ext->derive_key(32, shared_secret, kem_ct, std::vector<uint8_t>{});
 
     auto aes_key_bytes = hkdf_exp->derive_key(
-        32, prk, std::vector<uint8_t>{}, std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
+        cfg.botan_key_len(), prk, std::vector<uint8_t>{},
+        std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
     auto nonce_bytes = hkdf_exp->derive_key(12, prk, std::vector<uint8_t>{},
                                             std::vector<uint8_t>{'a', 'e', 's', '-', 'i', 'v'});
 
