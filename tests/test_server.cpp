@@ -1,14 +1,16 @@
 // Tests for the server protocol — REGISTER, GETKEY, SEND, POLL
-// Starts a real server thread on TEST_PORT and connects via TCP.
+// Starts a real server thread on TEST_PORT (plain TCP) and TEST_TLS_PORT (TLS).
 
 #include "../common/crypto.hpp"
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
+#include "../common/tls_utils.hpp"
 #include "../server/server.hpp"
 #include "test_runner.hpp"
 #include <arpa/inet.h>
 #include <botan/auto_rng.h>
 #include <botan/hex.h>
+#include <botan/tls_session_manager_noop.h>
 #include <chrono>
 #include <iostream>
 #include <netinet/in.h>
@@ -18,6 +20,69 @@
 #include <vector>
 
 static const int TEST_PORT = 59998;
+static const int TEST_TLS_PORT = 59997;
+
+// -------------------------------------------------------
+// TLS test helpers
+// -------------------------------------------------------
+class TestTlsCallbacks : public SocketTlsCallbacks
+{
+  public:
+    explicit TestTlsCallbacks(int fd) : SocketTlsCallbacks(fd) {}
+    void tls_verify_cert_chain(const std::vector<Botan::X509_Certificate>&,
+                               const std::vector<std::optional<Botan::OCSP::Response>>&,
+                               const std::vector<Botan::Certificate_Store*>&, Botan::Usage_Type,
+                               std::string_view, const Botan::TLS::Policy&) override
+    {
+    }
+};
+
+class TestTlsCredentials : public Botan::Credentials_Manager
+{
+};
+
+struct TlsConn {
+    int fd;
+    std::shared_ptr<TestTlsCallbacks> cb;
+    std::shared_ptr<Botan::TLS::Client> tls;
+};
+
+static TlsConn tls_connect(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        return {-1, nullptr, nullptr};
+    }
+    auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
+    auto cb = std::make_shared<TestTlsCallbacks>(fd);
+    auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
+    auto creds = std::make_shared<TestTlsCredentials>();
+    auto policy = std::make_shared<Botan::TLS::Policy>();
+    auto tls = std::make_shared<Botan::TLS::Client>(
+        cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng),
+        Botan::TLS::Server_Information("127.0.0.1", port));
+    while (!tls->is_active() && !cb->closed) {
+        uint8_t buf[4096];
+        ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            return {-1, nullptr, nullptr};
+        tls->received_data({buf, static_cast<size_t>(n)});
+    }
+    if (!tls->is_active())
+        return {-1, nullptr, nullptr};
+    return {fd, cb, tls};
+}
+
+static std::string tls_cmd(TlsConn& c, const std::string& line)
+{
+    tls_send_line(*c.tls, line);
+    return tls_read_line(c.fd, *c.tls, *c.cb);
+}
 static Botan::AutoSeeded_RNG rng;
 
 static int connect_test()
@@ -101,7 +166,8 @@ int main()
     std::cout << "=== server tests ===\n\n";
 
     std::thread([] { start_server(TEST_PORT); }).detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::thread([] { start_server_tls(TEST_TLS_PORT); }).detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
     // -------------------------------------------------------
     // REGISTER
@@ -470,6 +536,58 @@ int main()
         int ack = poll_ack(fd, sender.user_id, s_tok);
         ASSERT_EQ(ack, 0);
         close(fd);
+    }
+
+    // -------------------------------------------------------
+    // TLS transport — verify protocol works over encrypted channel
+    // -------------------------------------------------------
+    TEST("TLS REGISTER returns token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng);
+        auto conn = tls_connect(TEST_TLS_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string resp =
+            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        ASSERT_EQ(resp.substr(3).size(), (size_t)64);
+        close(conn.fd);
+    }
+
+    TEST("TLS SEND and POLL deliver message end-to-end");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng);
+        auto recipient = generate_identity(rng);
+        auto conn = tls_connect(TEST_TLS_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string s_tok = tls_cmd(conn, "REGISTER " + sender.user_id + " " +
+                                              Botan::hex_encode(sender.pubkey_bytes))
+                                .substr(3);
+        std::string r_tok = tls_cmd(conn, "REGISTER " + recipient.user_id + " " +
+                                              Botan::hex_encode(recipient.pubkey_bytes))
+                                .substr(3);
+        auto blob = encrypt_message("tls hello", sender.user_id, "s", recipient.pubkey_bytes, rng);
+        tls_cmd(conn, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                          Botan::hex_encode(blob));
+        // POLL recipient
+        tls_send_line(*conn.tls, "POLL " + recipient.user_id + " " + r_tok);
+        std::string msg_line = tls_read_line(conn.fd, *conn.tls, *conn.cb);
+        ASSERT_TRUE(msg_line.substr(0, 4) == "MSG ");
+        tls_read_line(conn.fd, *conn.tls, *conn.cb); // consume NOMSG
+        close(conn.fd);
+    }
+
+    TEST("TLS connection with bad token is rejected");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng);
+        auto conn = tls_connect(TEST_TLS_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = tls_cmd(conn, "POLL " + id.user_id + " " + std::string(64, '0'));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(conn.fd);
     }
 
     // -------------------------------------------------------
