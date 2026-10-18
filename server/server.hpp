@@ -1,10 +1,11 @@
 #pragma once
+#include "../common/config.hpp"
 
-// Start the server on the given port (plain TCP). For tests only.
+// Start plain TCP server — for tests only.
 void start_server(int port);
 
-// Start the server with TLS. Generates a self-signed cert on first run.
-void start_server_tls(int port);
+// Start TLS server using the operator config.
+void start_server_tls(const Config& cfg);
 
-// Clear all server state. For testing only.
+// Clear all server state — for tests only.
 void reset_server_state();

@@ -148,8 +148,10 @@ jobs:
             -object build/test_protocol \
             -object build/test_replay \
             -object build/test_server \
+            -object build/test_config \
             -instr-profile=coverage.profdata \
-            common/identity.cpp common/crypto.cpp common/replay.hpp server/server.cpp \
+            common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
+            common/replay.hpp server/server.cpp \
             | grep TOTAL | awk '{print $10}' | tr -d '%')
 
           echo "Line coverage: ${LINE_COV}%"
@@ -171,8 +173,10 @@ jobs:
               -object build/test_protocol \
               -object build/test_replay \
               -object build/test_server \
+              -object build/test_config \
               -instr-profile=coverage.profdata \
-              common/identity.cpp common/crypto.cpp common/replay.hpp server/server.cpp
+              common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
+              common/replay.hpp server/server.cpp
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
