@@ -1,16 +1,16 @@
 CXX      = c++
 CXXFLAGS = -std=c++20 -I./include/botan-3 -I. -Wall -pthread
-LDFLAGS  = -L./lib -lbotan-3 -Wl,-rpath,$(shell pwd)/lib -lpthread
+LDFLAGS  = -L./lib -lbotan-3 -Wl,-rpath,$(shell pwd)/lib -lpthread -lsqlite3
 
 # Portable CPU count: macOS uses sysctl, Linux uses nproc
 NCPUS ?= $(shell sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
 BUILD  = build
-COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp
+COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp common/store.cpp
 SERVER_SRC = server/server.cpp
 TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
              $(BUILD)/test_replay $(BUILD)/test_server $(BUILD)/test_config \
-             $(BUILD)/test_properties
+             $(BUILD)/test_properties $(BUILD)/test_store
 FUZZ_TARGETS = $(BUILD)/fuzz_config $(BUILD)/fuzz_crypto
 
 .PHONY: all setup test system-test sanitize coverage fuzz fuzz-build format format-check tidy clean
@@ -119,13 +119,15 @@ sanitize: clean $(TESTS)
 # clang-format — format: rewrite in place, format-check: CI gate
 # -------------------------------------------------------
 FMT_SRCS = common/config.cpp common/config.hpp common/kem.cpp common/kem.hpp \
+           common/store.cpp common/store.hpp \
            tests/test_config.cpp tests/test_properties.cpp \
            tests/fuzz_config.cpp tests/fuzz_crypto.cpp \
            common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
            common/protocol.hpp common/replay.hpp common/secure_memory.hpp common/tls_utils.hpp \
            server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
            tests/test_runner.hpp tests/test_identity.cpp tests/test_crypto.cpp \
-           tests/test_protocol.cpp tests/test_replay.cpp tests/test_server.cpp
+           tests/test_protocol.cpp tests/test_replay.cpp tests/test_server.cpp \
+           tests/test_store.cpp
 
 CLANG_FORMAT ?= xcrun clang-format
 
@@ -163,6 +165,7 @@ coverage: clean $(TESTS)
 	@LLVM_PROFILE_FILE="$(BUILD)/test_server.profraw"    ./$(BUILD)/test_server
 	@LLVM_PROFILE_FILE="$(BUILD)/test_config.profraw"      ./$(BUILD)/test_config
 	@LLVM_PROFILE_FILE="$(BUILD)/test_properties.profraw"  ./$(BUILD)/test_properties
+	@LLVM_PROFILE_FILE="$(BUILD)/test_store.profraw"       ./$(BUILD)/test_store
 	$(LLVM_PROFDATA) merge -sparse \
 	    $(BUILD)/test_identity.profraw \
 	    $(BUILD)/test_crypto.profraw \
@@ -171,6 +174,7 @@ coverage: clean $(TESTS)
 	    $(BUILD)/test_server.profraw \
 	    $(BUILD)/test_config.profraw \
 	    $(BUILD)/test_properties.profraw \
+	    $(BUILD)/test_store.profraw \
 	    -o coverage.profdata
 	@echo ""
 	@echo "=== Coverage summary ==="
@@ -181,9 +185,10 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_server \
 	    -object $(BUILD)/test_config \
 	    -object $(BUILD)/test_properties \
+	    -object $(BUILD)/test_store \
 	    -instr-profile=coverage.profdata \
 	    common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
-	    common/replay.hpp $(SERVER_SRC)
+	    common/store.cpp common/replay.hpp $(SERVER_SRC)
 	@echo ""
 	@echo "=== Generating HTML report ==="
 	$(LLVM_COV) show $(BUILD)/test_identity \
@@ -193,12 +198,13 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_server \
 	    -object $(BUILD)/test_config \
 	    -object $(BUILD)/test_properties \
+	    -object $(BUILD)/test_store \
 	    -instr-profile=coverage.profdata \
 	    -format=html \
 	    -output-dir=coverage_report \
 	    -show-line-counts-or-regions \
 	    common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
-	    common/replay.hpp $(SERVER_SRC)
+	    common/store.cpp common/replay.hpp $(SERVER_SRC)
 	@echo ""
 	@echo "Coverage report: coverage_report/index.html"
 

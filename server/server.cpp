@@ -3,6 +3,7 @@
 #include "server.hpp"
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
+#include "../common/store.hpp"
 #include "../common/tls_utils.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -18,7 +19,6 @@
 #include <botan/x509self.h>
 #include <chrono>
 #include <ctime>
-#include <errno.h>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -90,30 +90,13 @@ static bool ct_equal(const uint8_t* a, const uint8_t* b, size_t len)
     return diff == 0;
 }
 
-struct PendingMessage {
-    std::string id;
-    std::string sender_id;
-    std::vector<uint8_t> blob;
-    int64_t timestamp;
-};
-
-struct RateBucket {
-    int count{0};
-    int64_t window_start{0};
-    int64_t last_used{0}; // for cleanup
-};
-
-struct SessionInfo {
-    std::string token;
-    int64_t created_at;
-};
-
-static std::map<std::string, std::vector<uint8_t>> pubkeys;
-static std::map<std::string, std::vector<PendingMessage>> messages;
-static std::map<std::string, SessionInfo> sessions;
-static std::map<std::string, RateBucket> rate_buckets;
-static std::map<std::string, int> delivery_acks;
+// The store is created once on first call with the configured db_path.
+// Subsequent calls return the same instance. reset_server_state() replaces it
+// with a fresh in-memory store so tests start clean.
+static std::unique_ptr<Store> g_store;
 static std::mutex store_mutex;
+
+static Store& get_store() { return *g_store; }
 
 // ── server-wide globals ───────────────────────────────────────────────────────
 
@@ -138,7 +121,7 @@ static void handle_signal(int sig)
 
 static std::string new_message_id()
 {
-    // Random 16-byte ID — avoids leaking total server message volume via sequential counter
+    // Random 16-byte ID — avoids leaking total server message volume
     static Botan::AutoSeeded_RNG id_rng;
     return Botan::hex_encode(id_rng.random_vec(16));
 }
@@ -193,13 +176,11 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
         } else if (cmd == "STATUS") {
             // Health check — no auth required; safe for load balancers / k8s probes
             std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
             int64_t uptime = now_unix() - g_start_time;
-            size_t total_msgs = 0;
-            for (const auto& [uid, msgs] : messages)
-                total_msgs += msgs.size();
-            sl("OK users=" + std::to_string(pubkeys.size()) +
-               " sessions=" + std::to_string(sessions.size()) +
-               " messages=" + std::to_string(total_msgs) + " uptime=" + std::to_string(uptime));
+            sl("OK users=" + std::to_string(s.user_count()) +
+               " sessions=" + std::to_string(s.session_count()) + " messages=" +
+               std::to_string(s.total_messages()) + " uptime=" + std::to_string(uptime));
             LOG_DEBUG("[STATUS]   queried");
 
         } else if (cmd == "REGISTER") {
@@ -208,7 +189,6 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             try {
                 auto pubkey = Botan::hex_decode(pubkey_hex);
 
-                // Validate pubkey size against configured KEM
                 if (pubkey.size() != cfg.kem_pubkey_len()) {
                     sl("ERR pubkey size mismatch for configured KEM");
                     continue;
@@ -221,30 +201,29 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 }
 
                 std::lock_guard<std::mutex> lock(store_mutex);
+                Store& s = get_store();
 
-                // max_users check (0 = unlimited)
-                if (cfg.max_users > 0 && pubkeys.find(user_id) == pubkeys.end() &&
-                    static_cast<int>(pubkeys.size()) >= cfg.max_users) {
+                if (cfg.max_users > 0 && !s.user_exists(user_id) &&
+                    s.user_count() >= cfg.max_users) {
                     sl("ERR server has reached maximum user capacity");
                     continue;
                 }
 
-                auto existing = pubkeys.find(user_id);
-                if (existing != pubkeys.end() && existing->second != pubkey) {
+                auto existing = s.get_pubkey(user_id);
+                if (existing.has_value() && *existing != pubkey) {
                     sl("ERR user_id already registered with a different key");
                     continue;
                 }
 
                 auto token_bytes = rng.random_vec(32);
                 std::string token = Botan::hex_encode(token_bytes);
-                pubkeys[user_id] = pubkey;
-                sessions[user_id] = {token, now_unix()};
+                s.put_user(user_id, pubkey);
+                s.put_session(user_id, token, now_unix());
 
-                // Include active crypto params so the client can validate compatibility
                 sl("OK " + token + " kem=" + cfg.kem + " cipher=" + cfg.cipher +
                    " hash=" + cfg.hash + " pad=" + std::to_string(cfg.padded_plaintext_kb));
                 LOG_INFO("[REGISTER] user=" + user_id +
-                         " total_users=" + std::to_string(pubkeys.size()));
+                         " total_users=" + std::to_string(s.user_count()));
             } catch (...) {
                 sl("ERR invalid pubkey");
             }
@@ -253,30 +232,30 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             std::string user_id;
             ss >> user_id;
             std::lock_guard<std::mutex> lock(store_mutex);
-            auto it = pubkeys.find(user_id);
-            if (it == pubkeys.end()) {
+            auto key = get_store().get_pubkey(user_id);
+            if (!key.has_value()) {
                 sl("ERR unknown user");
             } else {
-                sl("OK " + Botan::hex_encode(it->second));
+                sl("OK " + Botan::hex_encode(*key));
             }
 
         } else if (cmd == "SEND") {
             std::string sender_id, token, recipient_id, blob_hex;
             ss >> sender_id >> token >> recipient_id >> blob_hex;
             std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
 
             // Token auth + session TTL
-            auto sess_it = sessions.find(sender_id);
-            bool token_ok = sess_it != sessions.end() &&
-                            sess_it->second.token.size() == token.size() &&
-                            ct_equal(reinterpret_cast<const uint8_t*>(sess_it->second.token.data()),
-                                     reinterpret_cast<const uint8_t*>(token.data()),
-                                     sess_it->second.token.size());
+            auto sess = s.get_session(sender_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
 
             if (token_ok && cfg.session_ttl_hours > 0) {
-                int64_t age_h = (now_unix() - sess_it->second.created_at) / 3600;
+                int64_t age_h = (now_unix() - sess->created_at) / 3600;
                 if (age_h >= cfg.session_ttl_hours) {
-                    sessions.erase(sess_it);
+                    s.remove_session(sender_id);
                     token_ok = false;
                 }
             }
@@ -288,28 +267,31 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
 
             // Rate limiting
             {
-                auto& bucket = rate_buckets[sender_id];
                 int64_t now = now_unix();
-                bucket.last_used = now;
-                if (now - bucket.window_start >= cfg.rate_limit_window_s) {
-                    bucket.count = 0;
-                    bucket.window_start = now;
+                auto bucket = s.get_rate_bucket(sender_id);
+                int count = 0;
+                int64_t window_start = now;
+                if (bucket.has_value()) {
+                    count = bucket->count;
+                    window_start = bucket->window_start;
+                    if (now - window_start >= cfg.rate_limit_window_s) {
+                        count = 0;
+                        window_start = now;
+                    }
                 }
-                if (bucket.count >= cfg.rate_limit_msgs) {
+                if (count >= cfg.rate_limit_msgs) {
                     sl("ERR rate limit exceeded");
                     continue;
                 }
-                bucket.count++;
+                s.put_rate_bucket(sender_id, count + 1, window_start, now);
             }
 
-            if (pubkeys.find(recipient_id) == pubkeys.end()) {
+            if (!s.user_exists(recipient_id)) {
                 sl("ERR unknown recipient");
                 continue;
             }
 
-            // Max inbox check
-            auto& inbox = messages[recipient_id];
-            if (static_cast<int>(inbox.size()) >= cfg.max_inbox_messages) {
+            if (s.inbox_size(recipient_id) >= cfg.max_inbox_messages) {
                 sl("ERR recipient inbox is full");
                 continue;
             }
@@ -321,7 +303,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                     continue;
                 }
                 std::string msg_id = new_message_id();
-                inbox.push_back({msg_id, sender_id, blob, now_unix()});
+                s.enqueue(msg_id, recipient_id, sender_id, blob, now_unix());
                 sl("OK");
                 LOG_INFO("[SEND]     to=" + recipient_id + " msg_id=" + msg_id + " blob=" +
                          std::to_string(blob.size()) + " bytes (server cannot read content)");
@@ -333,18 +315,18 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             std::string user_id, token;
             ss >> user_id >> token;
             std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
 
-            auto sess_it = sessions.find(user_id);
-            bool token_ok = sess_it != sessions.end() &&
-                            sess_it->second.token.size() == token.size() &&
-                            ct_equal(reinterpret_cast<const uint8_t*>(sess_it->second.token.data()),
-                                     reinterpret_cast<const uint8_t*>(token.data()),
-                                     sess_it->second.token.size());
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
 
             if (token_ok && cfg.session_ttl_hours > 0) {
-                int64_t age_h = (now_unix() - sess_it->second.created_at) / 3600;
+                int64_t age_h = (now_unix() - sess->created_at) / 3600;
                 if (age_h >= cfg.session_ttl_hours) {
-                    sessions.erase(sess_it);
+                    s.remove_session(user_id);
                     token_ok = false;
                 }
             }
@@ -355,23 +337,19 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 continue;
             }
 
-            auto msg_it = messages.find(user_id);
-            if (msg_it != messages.end() && !msg_it->second.empty()) {
-                size_t count = msg_it->second.size();
-                for (auto& msg : msg_it->second) {
+            auto msgs = s.drain_inbox(user_id);
+            if (!msgs.empty()) {
+                for (auto& msg : msgs) {
                     sl("MSG " + msg.id + " " + Botan::hex_encode(msg.blob));
-                    delivery_acks[msg.sender_id]++;
+                    s.increment_ack(msg.sender_id);
                 }
-                msg_it->second.clear();
-                LOG_INFO("[POLL]     user=" + user_id + " -> delivered " + std::to_string(count) +
-                         " message(s), wiped from store");
+                LOG_INFO("[POLL]     user=" + user_id + " -> delivered " +
+                         std::to_string(msgs.size()) + " message(s), wiped from store");
             }
 
-            auto ack_it = delivery_acks.find(user_id);
-            if (ack_it != delivery_acks.end() && ack_it->second > 0) {
-                sl("ACK " + std::to_string(ack_it->second));
-                ack_it->second = 0;
-            }
+            int ack = s.drain_ack(user_id);
+            if (ack > 0)
+                sl("ACK " + std::to_string(ack));
             sl("NOMSG");
 
         } else if (cmd == "DEREGISTER") {
@@ -379,23 +357,24 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             std::string user_id, token;
             ss >> user_id >> token;
             std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
 
-            auto sess_it = sessions.find(user_id);
-            bool token_ok = sess_it != sessions.end() &&
-                            sess_it->second.token.size() == token.size() &&
-                            ct_equal(reinterpret_cast<const uint8_t*>(sess_it->second.token.data()),
-                                     reinterpret_cast<const uint8_t*>(token.data()),
-                                     sess_it->second.token.size());
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
             if (!token_ok) {
                 sl("ERR invalid token");
                 continue;
             }
 
-            pubkeys.erase(user_id);
-            messages.erase(user_id);
-            sessions.erase(user_id);
-            rate_buckets.erase(user_id);
-            delivery_acks.erase(user_id);
+            s.remove_user(user_id);
+            s.remove_session(user_id);
+            s.remove_rate_bucket(user_id);
+            // drain_inbox implicitly deletes messages; delivery_acks reset on drain
+            s.drain_inbox(user_id);
+            s.drain_ack(user_id);
             sl("OK");
             LOG_INFO("[DEREGISTER] user=" + user_id + " — all data removed");
 
@@ -418,27 +397,14 @@ static void cleanup_thread(const Config& cfg)
         int64_t msg_cutoff = now - int64_t(cfg.msg_ttl_hours) * 3600;
         int64_t sess_cutoff =
             (cfg.session_ttl_hours > 0) ? now - int64_t(cfg.session_ttl_hours) * 3600 : 0;
-        // Rate buckets inactive for > 2× window are safe to drop
         int64_t bucket_cutoff = now - int64_t(cfg.rate_limit_window_s) * 2;
 
         std::lock_guard<std::mutex> lock(store_mutex);
-        for (auto& [uid, msgs] : messages) {
-            msgs.erase(std::remove_if(msgs.begin(), msgs.end(),
-                                      [msg_cutoff](const PendingMessage& m) {
-                                          return m.timestamp < msg_cutoff;
-                                      }),
-                       msgs.end());
-        }
-        if (sess_cutoff > 0) {
-            for (auto it = sessions.begin(); it != sessions.end();) {
-                it = (it->second.created_at < sess_cutoff) ? sessions.erase(it) : ++it;
-            }
-        }
-        for (auto it = rate_buckets.begin(); it != rate_buckets.end();) {
-            it = (it->second.last_used > 0 && it->second.last_used < bucket_cutoff)
-                     ? rate_buckets.erase(it)
-                     : ++it;
-        }
+        Store& s = get_store();
+        s.prune_messages(msg_cutoff);
+        if (sess_cutoff > 0)
+            s.prune_sessions(sess_cutoff);
+        s.prune_rate_buckets(bucket_cutoff);
     }
 }
 
@@ -469,7 +435,14 @@ static int make_listening_socket(int port, const std::string& bind_addr)
 
 void start_server(int port)
 {
-    Config cfg; // default config
+    Config cfg; // default config — always use in-memory DB for the plain TCP test server
+    cfg.db_path = "";
+    {
+        std::lock_guard<std::mutex> lock(store_mutex);
+        if (!g_store)
+            g_store = std::make_unique<Store>(cfg.db_path);
+    }
+
     int server_fd = make_listening_socket(port, "0.0.0.0");
     if (server_fd < 0)
         return;
@@ -531,8 +504,6 @@ class ServerCredentials : public Botan::Credentials_Manager
     }
 };
 
-// Custom TLS policy: respects configured minimum version and allows all cert algorithms
-// including Ed25519 (not in Botan's default policy).
 class ServerTlsPolicy : public Botan::TLS::Policy
 {
     bool allow_tls12_;
@@ -544,7 +515,6 @@ class ServerTlsPolicy : public Botan::TLS::Policy
     {
         return {"ECDSA", "RSA", "Ed25519"};
     }
-    // "Pure" is Ed25519's hash identifier (it embeds SHA-512 internally)
     std::vector<std::string> allowed_signature_hashes() const override
     {
         return {"SHA-512", "SHA-384", "SHA-256", "Pure"};
@@ -566,7 +536,6 @@ static void ensure_server_cert(const Config& cfg)
     } else if (cfg.cert_algorithm == "Ed25519") {
         key = std::make_unique<Botan::Ed25519_PrivateKey>(rng);
     } else {
-        // ECDSA-P256 (default)
         key =
             std::make_unique<Botan::ECDSA_PrivateKey>(rng, Botan::EC_Group::from_name("secp256r1"));
     }
@@ -574,13 +543,11 @@ static void ensure_server_cert(const Config& cfg)
     Botan::X509_Cert_Options opts;
     opts.common_name = "ZeroTraceMsg";
 
-    // Use current system time so the certificate is valid on the date it is generated
     auto now_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     auto exp_t = now_t + static_cast<std::time_t>(cfg.cert_validity_days) * 86400LL;
     opts.not_before(format_cert_date(now_t));
     opts.not_after(format_cert_date(exp_t));
 
-    // Ed25519 is internally fixed to SHA-512; ECDSA uses SHA-256
     std::string cert_hash = (cfg.cert_algorithm == "Ed25519") ? "SHA-512" : "SHA-256";
     auto cert = Botan::X509::create_self_signed_cert(opts, *key, cert_hash, rng);
 
@@ -598,6 +565,12 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
     log_init(cfg);
     g_start_time = now_unix();
     g_config_path = config_path;
+
+    {
+        std::lock_guard<std::mutex> lock(store_mutex);
+        if (!g_store)
+            g_store = std::make_unique<Store>(cfg.db_path);
+    }
 
     signal(SIGTERM, handle_signal);
     signal(SIGINT, handle_signal);
@@ -668,7 +641,6 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
         if (r == 0)
             continue;
 
-        // Enforce connection cap before accepting
         if (cfg.max_connections > 0 && g_active_connections.load() >= cfg.max_connections) {
             int cfd = accept(server_fd, nullptr, nullptr);
             if (cfd >= 0) {
@@ -690,9 +662,9 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
             } guard;
             auto rng_ptr = std::make_shared<Botan::AutoSeeded_RNG>();
             auto cb = std::make_shared<SocketTlsCallbacks>(cfd);
-            auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
+            auto sess_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
             auto tls = std::make_shared<Botan::TLS::Server>(
-                cb, session_mgr, creds, policy,
+                cb, sess_mgr, creds, policy,
                 std::shared_ptr<Botan::RandomNumberGenerator>(rng_ptr));
             handle_client(
                 cfd, [tls](const std::string& s) { tls_send_line(*tls, s); },
@@ -707,9 +679,9 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
 void reset_server_state()
 {
     std::lock_guard<std::mutex> lock(store_mutex);
-    pubkeys.clear();
-    messages.clear();
-    sessions.clear();
-    rate_buckets.clear();
-    delivery_acks.clear();
+    if (g_store) {
+        g_store->clear_all();
+    } else {
+        g_store = std::make_unique<Store>("");
+    }
 }

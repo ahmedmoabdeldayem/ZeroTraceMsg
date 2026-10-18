@@ -23,6 +23,8 @@ struct Config {
     int rate_limit_window_s = 60;
     std::string cert_path = "certs/server.cert.pem";
     std::string key_path = "certs/server.key.pem";
+    // [local] db_path: SQLite database file. Empty string = in-memory (for tests).
+    std::string db_path = "zerotrace.db";
 
     // ── [client] ────────────────────────────────────────────────────────
     std::string client_server = "127.0.0.1";
