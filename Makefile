@@ -8,7 +8,7 @@ SERVER_SRC = server/server.cpp
 TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
              $(BUILD)/test_replay $(BUILD)/test_server $(BUILD)/test_config
 
-.PHONY: all setup test sanitize coverage format format-check tidy clean
+.PHONY: all setup test system-test sanitize coverage format format-check tidy clean
 
 all: $(BUILD)/msg_server $(BUILD)/msg_client
 
@@ -45,6 +45,12 @@ test: $(TESTS)
 		echo "$$failed test suite(s) failed."; \
 		exit 1; \
 	fi
+
+# -------------------------------------------------------
+# System test — exercises compiled binaries end-to-end
+# -------------------------------------------------------
+system-test: all
+	@bash tests/test_system.sh
 
 # -------------------------------------------------------
 # Sanitizers — ASan + UBSan (run: make sanitize)
