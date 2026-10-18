@@ -212,8 +212,9 @@ int main()
     // Uses minimal Argon2id (m=8, t=1, p=1) so key-format
     // correctness is tested without KDF cost dominating time.
     // -------------------------------------------------------
-    for (const auto& kem : {"ECDH-P256", "ECDH-P384", "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024",
-                            "HYBRID-P256-ML-KEM-768", "HYBRID-P384-ML-KEM-1024"}) {
+    for (const auto& kem : {"ECDH-P256", "ECDH-P384", "X25519", "ML-KEM-512", "ML-KEM-768",
+                            "ML-KEM-1024", "HYBRID-P256-ML-KEM-768", "HYBRID-P384-ML-KEM-1024",
+                            "HYBRID-X25519-ML-KEM-768", "RSA-2048", "RSA-3072", "RSA-4096"}) {
         TEST(std::string("save/load round-trip: ") + kem);
         {
             Config c;

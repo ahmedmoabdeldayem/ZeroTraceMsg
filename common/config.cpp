@@ -92,13 +92,20 @@ void Config::validate() const
         throw std::invalid_argument("tls.cert_validity_days must be >= 1");
 
     // crypto — kem
-    static const std::set<std::string> valid_kem = {"ECDH-P256",
-                                                    "ECDH-P384",
-                                                    "ML-KEM-512",
-                                                    "ML-KEM-768",
-                                                    "ML-KEM-1024",
-                                                    "HYBRID-P256-ML-KEM-768",
-                                                    "HYBRID-P384-ML-KEM-1024"};
+    static const std::set<std::string> valid_kem = {
+        "ECDH-P256",
+        "ECDH-P384",
+        "X25519",
+        "ML-KEM-512",
+        "ML-KEM-768",
+        "ML-KEM-1024",
+        "HYBRID-P256-ML-KEM-768",
+        "HYBRID-P384-ML-KEM-1024",
+        "HYBRID-X25519-ML-KEM-768",
+        "RSA-2048",
+        "RSA-3072",
+        "RSA-4096",
+    };
     if (!valid_kem.count(kem))
         throw std::invalid_argument("crypto.kem: unknown value '" + kem + "'");
 

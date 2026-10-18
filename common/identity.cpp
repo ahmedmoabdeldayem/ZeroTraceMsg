@@ -4,6 +4,7 @@
 #include <botan/aead.h>
 #include <botan/hash.h>
 #include <botan/hex.h>
+#include <botan/pkcs8.h>
 #include <botan/pwdhash.h>
 #include <fstream>
 #include <span>
@@ -69,8 +70,10 @@ void save_identity(const Identity& id, const SecureString& passphrase, const std
     auto aes_key =
         kdf_from_passphrase(passphrase, std::span<const uint8_t>(salt.data(), salt.size()), cfg);
 
-    // Collect raw private key material (primary [+ secondary for hybrid])
-    auto raw = id.priv_key->raw_private_key_bits();
+    // Collect private key material.
+    // RSA does not implement raw_private_key_bits(); store full PKCS#8 PrivateKeyInfo instead.
+    auto raw = (cfg.kem.substr(0, 3) == "RSA") ? Botan::PKCS8::BER_encode(*id.priv_key)
+                                               : id.priv_key->raw_private_key_bits();
     if (id.priv_key2) {
         auto raw2 = id.priv_key2->raw_private_key_bits();
         raw.insert(raw.end(), raw2.begin(), raw2.end());
@@ -112,9 +115,17 @@ Identity load_identity(const SecureString& passphrase, const std::string& path, 
     dec->finish(ciphertext); // throws on wrong passphrase
 
     // Determine how many bytes belong to the primary key
-    bool hybrid = (cfg.kem == "HYBRID-P256-ML-KEM-768" || cfg.kem == "HYBRID-P384-ML-KEM-1024");
-    size_t primary_bytes = hybrid ? ((cfg.kem == "HYBRID-P256-ML-KEM-768") ? 32 : 48) // ECDH scalar
-                                  : ciphertext.size(); // all bytes for non-hybrid
+    bool hybrid = (cfg.kem == "HYBRID-P256-ML-KEM-768" || cfg.kem == "HYBRID-P384-ML-KEM-1024" ||
+                   cfg.kem == "HYBRID-X25519-ML-KEM-768");
+    size_t primary_bytes;
+    if (cfg.kem == "HYBRID-P256-ML-KEM-768")
+        primary_bytes = 32; // ECDH-P256 scalar
+    else if (cfg.kem == "HYBRID-P384-ML-KEM-1024")
+        primary_bytes = 48; // ECDH-P384 scalar
+    else if (cfg.kem == "HYBRID-X25519-ML-KEM-768")
+        primary_bytes = 32; // X25519 scalar
+    else
+        primary_bytes = ciphertext.size(); // all bytes for non-hybrid
 
     std::span<const uint8_t> bytes1(ciphertext.data(), primary_bytes);
     Identity id;

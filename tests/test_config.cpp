@@ -626,6 +626,62 @@ int main()
         ASSERT_EQ(c.kem_ciphertext_len(), (size_t)(97 + 1568));
     }
 
+    TEST("kem_pubkey_len: X25519 = 32");
+    {
+        Config c;
+        c.kem = "X25519";
+        ASSERT_EQ(c.kem_pubkey_len(), (size_t)32);
+    }
+
+    TEST("kem_ciphertext_len: X25519 = 32");
+    {
+        Config c;
+        c.kem = "X25519";
+        ASSERT_EQ(c.kem_ciphertext_len(), (size_t)32);
+    }
+
+    TEST("kem_pubkey_len: HYBRID-X25519-ML-KEM-768 = 32+1184");
+    {
+        Config c;
+        c.kem = "HYBRID-X25519-ML-KEM-768";
+        ASSERT_EQ(c.kem_pubkey_len(), (size_t)(32 + 1184));
+    }
+
+    TEST("kem_ciphertext_len: HYBRID-X25519-ML-KEM-768 = 32+1088");
+    {
+        Config c;
+        c.kem = "HYBRID-X25519-ML-KEM-768";
+        ASSERT_EQ(c.kem_ciphertext_len(), (size_t)(32 + 1088));
+    }
+
+    TEST("kem_pubkey_len: RSA-2048 = 256");
+    {
+        Config c;
+        c.kem = "RSA-2048";
+        ASSERT_EQ(c.kem_pubkey_len(), (size_t)256);
+    }
+
+    TEST("kem_ciphertext_len: RSA-2048 = 256");
+    {
+        Config c;
+        c.kem = "RSA-2048";
+        ASSERT_EQ(c.kem_ciphertext_len(), (size_t)256);
+    }
+
+    TEST("kem_pubkey_len: RSA-3072 = 384");
+    {
+        Config c;
+        c.kem = "RSA-3072";
+        ASSERT_EQ(c.kem_pubkey_len(), (size_t)384);
+    }
+
+    TEST("kem_pubkey_len: RSA-4096 = 512");
+    {
+        Config c;
+        c.kem = "RSA-4096";
+        ASSERT_EQ(c.kem_pubkey_len(), (size_t)512);
+    }
+
     TEST("padded_plaintext_bytes = padded_plaintext_kb * 1024");
     {
         Config c;
@@ -657,13 +713,20 @@ int main()
     // Encrypt/decrypt round-trip — all KEM × cipher × hash combinations
     // =========================================================================
 
-    std::vector<std::string> kems = {"ML-KEM-512",
-                                     "ML-KEM-768",
-                                     "ML-KEM-1024",
-                                     "ECDH-P256",
-                                     "ECDH-P384",
-                                     "HYBRID-P256-ML-KEM-768",
-                                     "HYBRID-P384-ML-KEM-1024"};
+    std::vector<std::string> kems = {
+        "ML-KEM-512",
+        "ML-KEM-768",
+        "ML-KEM-1024",
+        "ECDH-P256",
+        "ECDH-P384",
+        "X25519",
+        "HYBRID-P256-ML-KEM-768",
+        "HYBRID-P384-ML-KEM-1024",
+        "HYBRID-X25519-ML-KEM-768",
+        "RSA-2048",
+        "RSA-3072",
+        "RSA-4096",
+    };
     std::vector<std::string> ciphers = {"AES-256-GCM", "AES-128-GCM", "ChaCha20Poly1305"};
     std::vector<std::string> hashes = {"SHA-256", "SHA-384", "SHA-512", "SHA3-256"};
 

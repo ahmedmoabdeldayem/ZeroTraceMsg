@@ -438,7 +438,8 @@ class ServerCredentials : public Botan::Credentials_Manager
     }
 };
 
-// Custom TLS policy respecting configured minimum version
+// Custom TLS policy: respects configured minimum version and allows all cert algorithms
+// including Ed25519 (not in Botan's default policy).
 class ServerTlsPolicy : public Botan::TLS::Policy
 {
     bool allow_tls12_;
@@ -446,6 +447,15 @@ class ServerTlsPolicy : public Botan::TLS::Policy
   public:
     explicit ServerTlsPolicy(bool allow_tls12) : allow_tls12_(allow_tls12) {}
     bool allow_tls12() const override { return allow_tls12_; }
+    std::vector<std::string> allowed_signature_methods() const override
+    {
+        return {"ECDSA", "RSA", "Ed25519"};
+    }
+    // "Pure" is Ed25519's hash identifier (it embeds SHA-512 internally)
+    std::vector<std::string> allowed_signature_hashes() const override
+    {
+        return {"SHA-512", "SHA-384", "SHA-256", "Pure"};
+    }
 };
 
 static void ensure_server_cert(const Config& cfg)
@@ -476,7 +486,9 @@ static void ensure_server_cert(const Config& cfg)
     int year = 2024 + cfg.cert_validity_days / 365;
     opts.not_after(std::to_string(year) + "0101000000Z");
 
-    auto cert = Botan::X509::create_self_signed_cert(opts, *key, "SHA-256", rng);
+    // Ed25519 is internally fixed to SHA-512; ECDSA uses SHA-256
+    std::string cert_hash = (cfg.cert_algorithm == "Ed25519") ? "SHA-512" : "SHA-256";
+    auto cert = Botan::X509::create_self_signed_cert(opts, *key, cert_hash, rng);
 
     std::ofstream kf(cfg.key_path);
     kf << Botan::PKCS8::PEM_encode(*key);

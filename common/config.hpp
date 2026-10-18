@@ -85,6 +85,8 @@ struct Config {
             return 65;
         if (kem == "ECDH-P384")
             return 97;
+        if (kem == "X25519")
+            return 32;
         if (kem == "ML-KEM-512")
             return 768;
         if (kem == "ML-KEM-768")
@@ -95,6 +97,14 @@ struct Config {
             return 65 + 1088;
         if (kem == "HYBRID-P384-ML-KEM-1024")
             return 97 + 1568;
+        if (kem == "HYBRID-X25519-ML-KEM-768")
+            return 32 + 1088;
+        if (kem == "RSA-2048")
+            return 256;
+        if (kem == "RSA-3072")
+            return 384;
+        if (kem == "RSA-4096")
+            return 512;
         throw std::invalid_argument("Unknown KEM: " + kem);
     }
 
@@ -105,6 +115,8 @@ struct Config {
             return 65;
         if (kem == "ECDH-P384")
             return 97;
+        if (kem == "X25519")
+            return 32;
         if (kem == "ML-KEM-512")
             return 800;
         if (kem == "ML-KEM-768")
@@ -115,6 +127,14 @@ struct Config {
             return 65 + 1184;
         if (kem == "HYBRID-P384-ML-KEM-1024")
             return 97 + 1568;
+        if (kem == "HYBRID-X25519-ML-KEM-768")
+            return 32 + 1184;
+        if (kem == "RSA-2048")
+            return 256; // modulus only
+        if (kem == "RSA-3072")
+            return 384;
+        if (kem == "RSA-4096")
+            return 512;
         throw std::invalid_argument("Unknown KEM: " + kem);
     }
 

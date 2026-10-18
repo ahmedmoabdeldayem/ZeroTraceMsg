@@ -22,6 +22,8 @@
 
 static const int TEST_PORT = 59998;
 static const int TEST_TLS_PORT = 59997;
+static const int TEST_TLS_P384_PORT = 59996;
+static const int TEST_TLS_ED25519_PORT = 59995;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -40,6 +42,22 @@ class TestTlsCallbacks : public SocketTlsCallbacks
 
 class TestTlsCredentials : public Botan::Credentials_Manager
 {
+};
+
+// Extends the default policy to also allow Ed25519 certificates.
+// Needed because the Botan default policy only allows ECDSA and RSA.
+class AllSigMethodsPolicy : public Botan::TLS::Policy
+{
+  public:
+    std::vector<std::string> allowed_signature_methods() const override
+    {
+        return {"ECDSA", "RSA", "Ed25519"};
+    }
+    // "Pure" is Ed25519's hash identifier (it embeds SHA-512 internally)
+    std::vector<std::string> allowed_signature_hashes() const override
+    {
+        return {"SHA-512", "SHA-384", "SHA-256", "Pure"};
+    }
 };
 
 struct TlsConn {
@@ -64,6 +82,37 @@ static TlsConn tls_connect(int port)
     auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
     auto creds = std::make_shared<TestTlsCredentials>();
     auto policy = std::make_shared<Botan::TLS::Policy>();
+    auto tls = std::make_shared<Botan::TLS::Client>(
+        cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng),
+        Botan::TLS::Server_Information("127.0.0.1", port));
+    while (!tls->is_active() && !cb->closed) {
+        uint8_t buf[4096];
+        ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            return {-1, nullptr, nullptr};
+        tls->received_data({buf, static_cast<size_t>(n)});
+    }
+    if (!tls->is_active())
+        return {-1, nullptr, nullptr};
+    return {fd, cb, tls};
+}
+
+static TlsConn tls_connect_all_sig(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        return {-1, nullptr, nullptr};
+    }
+    auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
+    auto cb = std::make_shared<TestTlsCallbacks>(fd);
+    auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
+    auto creds = std::make_shared<TestTlsCredentials>();
+    auto policy = std::make_shared<AllSigMethodsPolicy>();
     auto tls = std::make_shared<Botan::TLS::Client>(
         cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng),
         Botan::TLS::Server_Information("127.0.0.1", port));
@@ -185,7 +234,23 @@ int main()
         tls_cfg.server_port = TEST_TLS_PORT;
         start_server_tls(tls_cfg);
     }).detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_TLS_P384_PORT;
+        cfg.cert_algorithm = "ECDSA-P384";
+        cfg.cert_path = "/tmp/ztm_test_p384.cert.pem";
+        cfg.key_path = "/tmp/ztm_test_p384.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_TLS_ED25519_PORT;
+        cfg.cert_algorithm = "Ed25519";
+        cfg.cert_path = "/tmp/ztm_test_ed25519.cert.pem";
+        cfg.key_path = "/tmp/ztm_test_ed25519.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
     // -------------------------------------------------------
     // REGISTER
@@ -591,6 +656,44 @@ int main()
         std::string resp = tls_cmd(conn, "POLL " + id.user_id + " " + std::string(64, '0'));
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(conn.fd);
+    }
+
+    // -------------------------------------------------------
+    // TLS cert algorithm variants
+    // Verifies that ECDSA-P384 and Ed25519 server certs
+    // complete a TLS handshake and accept REGISTER.
+    // -------------------------------------------------------
+    TEST("TLS ECDSA-P384 cert: handshake completes and REGISTER succeeds");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_TLS_P384_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string resp =
+            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        ASSERT_EQ(extract_token(resp).size(), (size_t)64);
+        close(conn.fd);
+    }
+
+    TEST("TLS Ed25519 cert: server starts and cert file is created");
+    {
+        // Note: Botan's Signature_Scheme::all_available_schemes() comments out EDDSA_25519
+        // ("not supported as a signature scheme for certificate authentication" — botan/pull/2958).
+        // So an Ed25519 cert cannot complete a TLS 1.3 handshake in this Botan build.
+        // We test that the server at least starts and accepts TCP connections.
+        reset_server_state();
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(TEST_TLS_ED25519_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        int rc = connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+        ASSERT_EQ(rc, 0); // server is listening
+        close(fd);
+        // Verify cert file was created
+        std::ifstream cert_file("/tmp/ztm_test_ed25519.cert.pem");
+        ASSERT_TRUE(cert_file.good());
     }
 
     // -------------------------------------------------------
