@@ -24,6 +24,12 @@ static const int TEST_PORT = 59998;
 static const int TEST_TLS_PORT = 59997;
 static const int TEST_TLS_P384_PORT = 59996;
 static const int TEST_TLS_ED25519_PORT = 59995;
+// Plain TCP server with tight limits (max_users=2, max_inbox_messages=2)
+static const int TEST_RESTRICTED_PORT = 59994;
+// TLS server that writes logs to a file (covers log_init file/level/format paths)
+static const int TEST_LOG_FILE_PORT = 59993;
+// TLS server with a fresh cert path (covers ensure_server_cert generation path)
+static const int TEST_CERT_GEN_PORT = 59992;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -234,6 +240,39 @@ int main()
         tls_cfg.server_port = TEST_TLS_PORT;
         start_server_tls(tls_cfg);
     }).detach();
+    // Restricted server: max_users=2, max_inbox_messages=2 (uses TLS so Config is respected)
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_RESTRICTED_PORT;
+        cfg.max_users = 2;
+        cfg.max_inbox_messages = 2;
+        cfg.cert_path = "/tmp/ztm_restricted.cert.pem";
+        cfg.key_path = "/tmp/ztm_restricted.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // Log-to-file server: covers log_level=debug and log_format=json paths
+    // Uses its own cert paths to avoid racing with the TEST_TLS_PORT server over
+    // "certs/server.cert.pem" (both would otherwise use the default path).
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_LOG_FILE_PORT;
+        cfg.log_level = "debug";
+        cfg.log_format = "json";
+        cfg.log_file = "/tmp/ztm_test_server.log";
+        cfg.cert_path = "/tmp/ztm_logfile.cert.pem";
+        cfg.key_path = "/tmp/ztm_logfile.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // Fresh-cert server: covers ensure_server_cert generation (delete files first)
+    std::thread([] {
+        std::remove("/tmp/ztm_certgen.cert.pem");
+        std::remove("/tmp/ztm_certgen.key.pem");
+        Config cfg;
+        cfg.server_port = TEST_CERT_GEN_PORT;
+        cfg.cert_path = "/tmp/ztm_certgen.cert.pem";
+        cfg.key_path = "/tmp/ztm_certgen.key.pem";
+        start_server_tls(cfg);
+    }).detach();
     std::thread([] {
         Config cfg;
         cfg.server_port = TEST_TLS_P384_PORT;
@@ -250,7 +289,7 @@ int main()
         cfg.key_path = "/tmp/ztm_test_ed25519.key.pem";
         start_server_tls(cfg);
     }).detach();
-    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
     // -------------------------------------------------------
     // REGISTER
@@ -706,6 +745,126 @@ int main()
         std::string resp = cmd(fd, "INVALID");
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
+    }
+
+    // -------------------------------------------------------
+    // REGISTER edge cases (covers uncovered server.cpp paths)
+    // -------------------------------------------------------
+
+    TEST("REGISTER rejects pubkey whose byte-length does not match the configured KEM");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        // Default server uses ML-KEM-768 (1184-byte pubkey). Send 65 bytes instead.
+        std::vector<uint8_t> wrong_size(65, 0xAB);
+        std::string resp = cmd(fd, "REGISTER 0000000000000000 " + Botan::hex_encode(wrong_size));
+        ASSERT_TRUE(resp.find("mismatch") != std::string::npos || resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REGISTER rejects when max_users limit is reached");
+    {
+        // Restricted server has max_users=2
+        reset_server_state();
+        auto id1 = generate_identity(rng, g_cfg);
+        auto id2 = generate_identity(rng, g_cfg);
+        auto id3 = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_RESTRICTED_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        // Register up to the limit
+        ASSERT_TRUE(
+            tls_cmd(conn, "REGISTER " + id1.user_id + " " + Botan::hex_encode(id1.pubkey_bytes))
+                .substr(0, 3) == "OK ");
+        ASSERT_TRUE(
+            tls_cmd(conn, "REGISTER " + id2.user_id + " " + Botan::hex_encode(id2.pubkey_bytes))
+                .substr(0, 3) == "OK ");
+        // Third registration must be rejected
+        std::string resp =
+            tls_cmd(conn, "REGISTER " + id3.user_id + " " + Botan::hex_encode(id3.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(conn.fd);
+    }
+
+    // -------------------------------------------------------
+    // SEND edge cases
+    // -------------------------------------------------------
+
+    TEST("SEND rejects non-hex blob");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        // ZZZZ is not valid hex
+        std::string resp =
+            cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " ZZZZZZZZ");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("SEND rejects when recipient inbox is full");
+    {
+        // Restricted server has max_inbox_messages=2
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_RESTRICTED_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string s_tok = extract_token(tls_cmd(
+            conn, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        tls_cmd(conn,
+                "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        std::string blob_hex = Botan::hex_encode(blob);
+        // Fill inbox to the limit (2 messages)
+        tls_cmd(conn,
+                "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " + blob_hex);
+        tls_cmd(conn,
+                "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " + blob_hex);
+        // Third send must be rejected
+        std::string resp = tls_cmd(conn, "SEND " + sender.user_id + " " + s_tok + " " +
+                                             recipient.user_id + " " + blob_hex);
+        ASSERT_TRUE(resp.find("inbox") != std::string::npos || resp.substr(0, 3) == "ERR");
+        close(conn.fd);
+    }
+
+    // -------------------------------------------------------
+    // Logging paths
+    // -------------------------------------------------------
+
+    TEST("log_level=debug and log_format=json: server writes to log file");
+    {
+        // The log-file server was started with debug + json + a file path.
+        // The log file's existence confirms log_init opened it (covers the
+        // log_file branch in log_init). Multiple servers share global log
+        // state, so we only assert the file was created and is non-empty —
+        // not the exact format, which depends on which log_init ran last.
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_LOG_FILE_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        close(conn.fd);
+        std::ifstream f("/tmp/ztm_test_server.log");
+        ASSERT_TRUE(f.good());
+        // file must contain at least one log line
+        std::string content((std::istreambuf_iterator<char>(f)), {});
+        ASSERT_TRUE(!content.empty());
+    }
+
+    // -------------------------------------------------------
+    // Cert generation path
+    // -------------------------------------------------------
+
+    TEST("ensure_server_cert: cert and key files are created on first start");
+    {
+        // The cert-gen server deleted its cert files before starting,
+        // so ensure_server_cert must have generated them.
+        ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen.cert.pem").good());
+        ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen.key.pem").good());
     }
 
     SUITE_RESULTS();

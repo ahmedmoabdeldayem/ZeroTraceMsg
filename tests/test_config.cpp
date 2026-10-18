@@ -416,8 +416,71 @@ int main()
     TEST("load: invalid integer throws");
     ASSERT_THROWS(Config::load(write_conf("[server]\nport = abc\n")));
 
+    TEST("load: integer with trailing non-numeric characters throws");
+    ASSERT_THROWS(Config::load(write_conf("[server]\nport = 42abc\n")));
+
     TEST("load: invalid value caught at validate()");
     ASSERT_THROWS(Config::load(write_conf("[server]\nport = 99999\n")));
+
+    TEST("load: every key in every section is parsed");
+    {
+        auto path = write_conf("[server]\n"
+                               "port                 = 9999\n"
+                               "bind_address         = 127.0.0.1\n"
+                               "max_users            = 50\n"
+                               "max_inbox_messages   = 25\n"
+                               "session_ttl_hours    = 12\n"
+                               "msg_ttl_hours        = 24\n"
+                               "cleanup_interval_min = 5\n"
+                               "rate_limit_msgs      = 10\n"
+                               "rate_limit_window_s  = 30\n"
+                               "cert_path            = /tmp/ztm_srv.cert.pem\n"
+                               "key_path             = /tmp/ztm_srv.key.pem\n"
+                               "[client]\n"
+                               "server                  = 10.0.0.1\n"
+                               "port                    = 8888\n"
+                               "poll_interval_s         = 5\n"
+                               "msg_ttl_s               = 60\n"
+                               "identity_dir            = /tmp/ztm_ids/\n"
+                               "connection_timeout_s    = 20\n"
+                               "reconnect_on_disconnect = false\n"
+                               "[tls]\n"
+                               "min_version        = 1.2\n"
+                               "cert_algorithm     = ECDSA-P384\n"
+                               "cert_validity_days = 180\n"
+                               "[crypto]\n"
+                               "kem                        = ECDH-P256\n"
+                               "cipher                     = ChaCha20Poly1305\n"
+                               "hash                       = SHA-512\n"
+                               "padded_plaintext_kb        = 8\n"
+                               "passphrase_kdf             = Argon2id\n"
+                               "passphrase_kdf_cost        = 2\n"
+                               "passphrase_kdf_memory_kb   = 32768\n"
+                               "passphrase_kdf_parallelism = 2\n"
+                               "[logging]\n"
+                               "level  = warn\n"
+                               "file   = /tmp/ztm_test.log\n"
+                               "format = json\n");
+        auto c = Config::load(path);
+        ASSERT_EQ(c.server_bind, std::string("127.0.0.1"));
+        ASSERT_EQ(c.max_inbox_messages, 25);
+        ASSERT_EQ(c.session_ttl_hours, 12);
+        ASSERT_EQ(c.msg_ttl_hours, 24);
+        ASSERT_EQ(c.cleanup_interval_min, 5);
+        ASSERT_EQ(c.rate_limit_window_s, 30);
+        ASSERT_EQ(c.cert_path, std::string("/tmp/ztm_srv.cert.pem"));
+        ASSERT_EQ(c.key_path, std::string("/tmp/ztm_srv.key.pem"));
+        ASSERT_EQ(c.client_server, std::string("10.0.0.1"));
+        ASSERT_EQ(c.client_port, 8888);
+        ASSERT_EQ(c.msg_ttl_s, 60);
+        ASSERT_EQ(c.identity_dir, std::string("/tmp/ztm_ids/"));
+        ASSERT_EQ(c.reconnect_on_disconnect, false);
+        ASSERT_EQ(c.cert_algorithm, std::string("ECDSA-P384"));
+        ASSERT_EQ(c.passphrase_kdf_memory_kb, 32768);
+        ASSERT_EQ(c.passphrase_kdf_parallelism, 2);
+        ASSERT_EQ(c.log_file, std::string("/tmp/ztm_test.log"));
+        ASSERT_EQ(c.log_format, std::string("json"));
+    }
 
     TEST("load: bool true/false/yes/no/1/0 all parse");
     {
