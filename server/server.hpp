@@ -5,7 +5,8 @@
 void start_server(int port);
 
 // Start TLS server using the operator config.
-void start_server_tls(const Config& cfg);
+// config_path is stored for SIGHUP hot-reload; defaults to "zerotrace.conf".
+void start_server_tls(const Config& cfg, const std::string& config_path = "zerotrace.conf");
 
 // Clear all server state — for tests only.
 void reset_server_state();

@@ -13,7 +13,8 @@ struct Config {
     // ── [server] ────────────────────────────────────────────────────────
     int server_port = 9999;
     std::string server_bind = "0.0.0.0";
-    int max_users = 0; // 0 = unlimited
+    int max_users = 0;          // 0 = unlimited
+    int max_connections = 1000; // 0 = unlimited; cap on concurrent TCP connections
     int max_inbox_messages = 100;
     int session_ttl_hours = 24; // 0 = never expire
     int msg_ttl_hours = 48;

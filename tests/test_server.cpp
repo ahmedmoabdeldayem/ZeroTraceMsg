@@ -736,6 +736,127 @@ int main()
     }
 
     // -------------------------------------------------------
+    // HELLO — version handshake
+    // -------------------------------------------------------
+    TEST("HELLO with correct version returns OK");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        std::string resp = cmd(fd, "HELLO ZTM/1");
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        ASSERT_TRUE(resp.find("ZTM/1") != std::string::npos);
+        close(fd);
+    }
+
+    TEST("HELLO with wrong version closes connection");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        std::string resp = cmd(fd, "HELLO ZTM/999");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        ASSERT_TRUE(resp.find("version_mismatch") != std::string::npos);
+        close(fd);
+    }
+
+    TEST("REGISTER without HELLO still works (backward compat)");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string resp =
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // STATUS — health check (no auth)
+    // -------------------------------------------------------
+    TEST("STATUS returns OK with metrics");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        close(fd);
+
+        fd = connect_test();
+        std::string resp = cmd(fd, "STATUS");
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        ASSERT_TRUE(resp.find("users=1") != std::string::npos);
+        ASSERT_TRUE(resp.find("uptime=") != std::string::npos);
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // DEREGISTER — account erasure
+    // -------------------------------------------------------
+    TEST("DEREGISTER removes user, key, and messages");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string token = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        ASSERT_TRUE(!token.empty());
+
+        std::string dresp = cmd(fd, "DEREGISTER " + id.user_id + " " + token);
+        ASSERT_TRUE(dresp == "OK");
+
+        // GETKEY should now fail
+        std::string kresp = cmd(fd, "GETKEY " + id.user_id);
+        ASSERT_TRUE(kresp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("DEREGISTER with wrong token is rejected");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = cmd(fd, "DEREGISTER " + id.user_id + " " + std::string(64, '0'));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Message IDs — must be 32 hex chars (random, not sequential)
+    // -------------------------------------------------------
+    TEST("message IDs are 32-char hex strings");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+        auto blob = encrypt_message("x", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+
+        // parse MSG line to extract ID
+        send_line(fd, "POLL " + recipient.user_id + " " + r_tok);
+        std::string msg_line = read_line(fd);
+        while (msg_line == "NOMSG" || msg_line.substr(0, 4) == "ACK ")
+            msg_line = read_line(fd);
+        ASSERT_TRUE(msg_line.substr(0, 4) == "MSG ");
+        std::istringstream ss(msg_line.substr(4));
+        std::string msg_id;
+        ss >> msg_id;
+        ASSERT_EQ(msg_id.size(), (size_t)32);
+        // Must be all hex chars
+        bool all_hex = true;
+        for (char c : msg_id)
+            if (!std::isxdigit(c))
+                all_hex = false;
+        ASSERT_TRUE(all_hex);
+        close(fd);
+    }
+
+    // -------------------------------------------------------
     // Unknown command
     // -------------------------------------------------------
     TEST("unknown command returns ERR");

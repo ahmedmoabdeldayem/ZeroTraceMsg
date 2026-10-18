@@ -2,6 +2,9 @@ CXX      = c++
 CXXFLAGS = -std=c++20 -I./include/botan-3 -I. -Wall -pthread
 LDFLAGS  = -L./lib -lbotan-3 -Wl,-rpath,$(shell pwd)/lib -lpthread
 
+# Portable CPU count: macOS uses sysctl, Linux uses nproc
+NCPUS ?= $(shell sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+
 BUILD  = build
 COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp
 SERVER_SRC = server/server.cpp
@@ -145,8 +148,8 @@ tidy:
 # -------------------------------------------------------
 # Coverage — uses LLVM source-based coverage (Xcode built-in)
 # -------------------------------------------------------
-LLVM_COV      = xcrun llvm-cov
-LLVM_PROFDATA = xcrun llvm-profdata
+LLVM_COV      ?= xcrun llvm-cov
+LLVM_PROFDATA ?= xcrun llvm-profdata
 COVFLAGS      = -fprofile-instr-generate -fcoverage-mapping -O0
 
 coverage: CXXFLAGS += $(COVFLAGS)
@@ -205,10 +208,11 @@ coverage: clean $(TESTS)
 setup:
 	cd botan-src && \
 	./configure.py --prefix=$(shell pwd) && \
-	make -j$(shell sysctl -n hw.logicalcpu) && \
-	make install && \
-	cd .. && \
-	codesign --force --sign - lib/libbotan-3.dylib
+	make -j$(NCPUS) && \
+	make install
+	@if [ "$$(uname)" = "Darwin" ]; then \
+	    codesign --force --sign - lib/libbotan-3.dylib; \
+	fi
 
 clean:
 	rm -rf $(BUILD)/

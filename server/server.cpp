@@ -17,12 +17,16 @@
 #include <botan/tls_session_manager_noop.h>
 #include <botan/x509self.h>
 #include <chrono>
+#include <ctime>
+#include <errno.h>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <netinet/in.h>
+#include <poll.h>
+#include <signal.h>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
@@ -96,6 +100,7 @@ struct PendingMessage {
 struct RateBucket {
     int count{0};
     int64_t window_start{0};
+    int64_t last_used{0}; // for cleanup
 };
 
 struct SessionInfo {
@@ -110,12 +115,32 @@ static std::map<std::string, RateBucket> rate_buckets;
 static std::map<std::string, int> delivery_acks;
 static std::mutex store_mutex;
 
+// ── server-wide globals ───────────────────────────────────────────────────────
+
+static std::atomic<bool> g_shutdown{false};
+static std::atomic<bool> g_reload_config{false};
+static std::atomic<bool> g_log_reopen{false};
+static std::atomic<int> g_active_connections{0};
+static int64_t g_start_time = 0;
+static std::string g_config_path;
+
+static void handle_signal(int sig)
+{
+    if (sig == SIGTERM || sig == SIGINT)
+        g_shutdown.store(true);
+    else if (sig == SIGHUP)
+        g_reload_config.store(true);
+    else if (sig == SIGUSR1)
+        g_log_reopen.store(true);
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 static std::string new_message_id()
 {
-    static std::atomic<uint64_t> counter{1};
-    std::ostringstream ss;
-    ss << std::hex << counter.fetch_add(1);
-    return ss.str();
+    // Random 16-byte ID — avoids leaking total server message volume via sequential counter
+    static Botan::AutoSeeded_RNG id_rng;
+    return Botan::hex_encode(id_rng.random_vec(16));
 }
 
 static int64_t now_unix()
@@ -123,6 +148,15 @@ static int64_t now_unix()
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+static std::string format_cert_date(std::time_t t)
+{
+    struct tm tm_info;
+    gmtime_r(&t, &tm_info);
+    char buf[16];
+    strftime(buf, sizeof(buf), "%Y%m%d%H%M%SZ", &tm_info);
+    return std::string(buf);
 }
 
 // ── protocol handler ──────────────────────────────────────────────────────────
@@ -144,7 +178,31 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
         std::string cmd;
         ss >> cmd;
 
-        if (cmd == "REGISTER") {
+        if (cmd == "HELLO") {
+            // Protocol version handshake — optional (old clients send REGISTER directly)
+            std::string ver;
+            ss >> ver;
+            std::string expected = "ZTM/" + std::to_string(PROTOCOL_VERSION);
+            if (ver == expected) {
+                sl("OK " + expected);
+            } else {
+                sl("ERR version_mismatch supported=" + std::to_string(PROTOCOL_VERSION));
+                break;
+            }
+
+        } else if (cmd == "STATUS") {
+            // Health check — no auth required; safe for load balancers / k8s probes
+            std::lock_guard<std::mutex> lock(store_mutex);
+            int64_t uptime = now_unix() - g_start_time;
+            size_t total_msgs = 0;
+            for (const auto& [uid, msgs] : messages)
+                total_msgs += msgs.size();
+            sl("OK users=" + std::to_string(pubkeys.size()) +
+               " sessions=" + std::to_string(sessions.size()) +
+               " messages=" + std::to_string(total_msgs) + " uptime=" + std::to_string(uptime));
+            LOG_DEBUG("[STATUS]   queried");
+
+        } else if (cmd == "REGISTER") {
             std::string user_id, pubkey_hex;
             ss >> user_id >> pubkey_hex;
             try {
@@ -232,6 +290,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             {
                 auto& bucket = rate_buckets[sender_id];
                 int64_t now = now_unix();
+                bucket.last_used = now;
                 if (now - bucket.window_start >= cfg.rate_limit_window_s) {
                     bucket.count = 0;
                     bucket.window_start = now;
@@ -315,6 +374,31 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             }
             sl("NOMSG");
 
+        } else if (cmd == "DEREGISTER") {
+            // GDPR right to erasure — removes all server-side data for this user
+            std::string user_id, token;
+            ss >> user_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+
+            auto sess_it = sessions.find(user_id);
+            bool token_ok = sess_it != sessions.end() &&
+                            sess_it->second.token.size() == token.size() &&
+                            ct_equal(reinterpret_cast<const uint8_t*>(sess_it->second.token.data()),
+                                     reinterpret_cast<const uint8_t*>(token.data()),
+                                     sess_it->second.token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+
+            pubkeys.erase(user_id);
+            messages.erase(user_id);
+            sessions.erase(user_id);
+            rate_buckets.erase(user_id);
+            delivery_acks.erase(user_id);
+            sl("OK");
+            LOG_INFO("[DEREGISTER] user=" + user_id + " — all data removed");
+
         } else {
             sl("ERR unknown command");
         }
@@ -330,9 +414,13 @@ static void cleanup_thread(const Config& cfg)
 {
     while (true) {
         std::this_thread::sleep_for(std::chrono::minutes(cfg.cleanup_interval_min));
-        int64_t msg_cutoff = now_unix() - int64_t(cfg.msg_ttl_hours) * 3600;
+        int64_t now = now_unix();
+        int64_t msg_cutoff = now - int64_t(cfg.msg_ttl_hours) * 3600;
         int64_t sess_cutoff =
-            (cfg.session_ttl_hours > 0) ? now_unix() - int64_t(cfg.session_ttl_hours) * 3600 : 0;
+            (cfg.session_ttl_hours > 0) ? now - int64_t(cfg.session_ttl_hours) * 3600 : 0;
+        // Rate buckets inactive for > 2× window are safe to drop
+        int64_t bucket_cutoff = now - int64_t(cfg.rate_limit_window_s) * 2;
+
         std::lock_guard<std::mutex> lock(store_mutex);
         for (auto& [uid, msgs] : messages) {
             msgs.erase(std::remove_if(msgs.begin(), msgs.end(),
@@ -345,6 +433,11 @@ static void cleanup_thread(const Config& cfg)
             for (auto it = sessions.begin(); it != sessions.end();) {
                 it = (it->second.created_at < sess_cutoff) ? sessions.erase(it) : ++it;
             }
+        }
+        for (auto it = rate_buckets.begin(); it != rate_buckets.end();) {
+            it = (it->second.last_used > 0 && it->second.last_used < bucket_cutoff)
+                     ? rate_buckets.erase(it)
+                     : ++it;
         }
     }
 }
@@ -368,7 +461,7 @@ static int make_listening_socket(int port, const std::string& bind_addr)
         perror("bind");
         return -1;
     }
-    listen(server_fd, 16);
+    listen(server_fd, SOMAXCONN);
     return server_fd;
 }
 
@@ -480,11 +573,12 @@ static void ensure_server_cert(const Config& cfg)
 
     Botan::X509_Cert_Options opts;
     opts.common_name = "ZeroTraceMsg";
-    // validity window
-    opts.not_before("20240101000000Z");
-    // approximate: add cert_validity_days
-    int year = 2024 + cfg.cert_validity_days / 365;
-    opts.not_after(std::to_string(year) + "0101000000Z");
+
+    // Use current system time so the certificate is valid on the date it is generated
+    auto now_t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    auto exp_t = now_t + static_cast<std::time_t>(cfg.cert_validity_days) * 86400LL;
+    opts.not_before(format_cert_date(now_t));
+    opts.not_after(format_cert_date(exp_t));
 
     // Ed25519 is internally fixed to SHA-512; ECDSA uses SHA-256
     std::string cert_hash = (cfg.cert_algorithm == "Ed25519") ? "SHA-512" : "SHA-256";
@@ -498,9 +592,17 @@ static void ensure_server_cert(const Config& cfg)
     LOG_INFO("[TLS] Generated self-signed certificate: " + cfg.cert_path);
 }
 
-void start_server_tls(const Config& cfg)
+void start_server_tls(const Config& cfg_init, const std::string& config_path)
 {
+    Config cfg = cfg_init;
     log_init(cfg);
+    g_start_time = now_unix();
+    g_config_path = config_path;
+
+    signal(SIGTERM, handle_signal);
+    signal(SIGINT, handle_signal);
+    signal(SIGHUP, handle_signal);
+    signal(SIGUSR1, handle_signal);
 
     mkdir("certs", 0700);
     ensure_server_cert(cfg);
@@ -516,21 +618,90 @@ void start_server_tls(const Config& cfg)
              " (TLS " + cfg.tls_min_version + "+)");
     std::thread([cfg]() { cleanup_thread(cfg); }).detach();
 
-    while (true) {
+    struct pollfd pfd = {server_fd, POLLIN, 0};
+    while (!g_shutdown.load()) {
+        // SIGHUP: hot-reload mutable config fields without restarting
+        if (g_reload_config.exchange(false) && !g_config_path.empty()) {
+            try {
+                Config nc = Config::load(g_config_path);
+                cfg.log_level = nc.log_level;
+                cfg.log_format = nc.log_format;
+                cfg.rate_limit_msgs = nc.rate_limit_msgs;
+                cfg.rate_limit_window_s = nc.rate_limit_window_s;
+                cfg.session_ttl_hours = nc.session_ttl_hours;
+                cfg.msg_ttl_hours = nc.msg_ttl_hours;
+                cfg.max_connections = nc.max_connections;
+                {
+                    std::lock_guard<std::mutex> lk(g_log_mutex);
+                    g_log_json = (cfg.log_format == "json");
+                    if (cfg.log_level == "debug")
+                        g_log_level = 0;
+                    else if (cfg.log_level == "info")
+                        g_log_level = 1;
+                    else if (cfg.log_level == "warn")
+                        g_log_level = 2;
+                    else
+                        g_log_level = 3;
+                }
+                LOG_INFO("[SIGHUP] Config reloaded from " + g_config_path);
+            } catch (const std::exception& e) {
+                LOG_WARN("[SIGHUP] Config reload failed: " + std::string(e.what()));
+            }
+        }
+
+        // SIGUSR1: reopen log file (for logrotate integration)
+        if (g_log_reopen.exchange(false)) {
+            std::lock_guard<std::mutex> lk(g_log_mutex);
+            if (g_log_file.is_open()) {
+                g_log_file.close();
+                g_log_file.open(cfg.log_file, std::ios::app);
+            }
+            LOG_INFO("[SIGUSR1] Log file reopened");
+        }
+
+        int r = poll(&pfd, 1, 1000); // 1 s timeout to check shutdown / reload flags
+        if (r < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        if (r == 0)
+            continue;
+
+        // Enforce connection cap before accepting
+        if (cfg.max_connections > 0 && g_active_connections.load() >= cfg.max_connections) {
+            int cfd = accept(server_fd, nullptr, nullptr);
+            if (cfd >= 0) {
+                LOG_WARN("[CONNECT] rejected (max_connections=" +
+                         std::to_string(cfg.max_connections) + " reached)");
+                close(cfd);
+            }
+            continue;
+        }
+
         int cfd = accept(server_fd, nullptr, nullptr);
         if (cfd < 0)
             continue;
+
+        g_active_connections.fetch_add(1);
         std::thread([cfd, creds, policy, cfg]() {
-            auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
+            struct Guard {
+                ~Guard() { g_active_connections.fetch_sub(1); }
+            } guard;
+            auto rng_ptr = std::make_shared<Botan::AutoSeeded_RNG>();
             auto cb = std::make_shared<SocketTlsCallbacks>(cfd);
             auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
             auto tls = std::make_shared<Botan::TLS::Server>(
-                cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng));
+                cb, session_mgr, creds, policy,
+                std::shared_ptr<Botan::RandomNumberGenerator>(rng_ptr));
             handle_client(
                 cfd, [tls](const std::string& s) { tls_send_line(*tls, s); },
                 [cfd, tls, cb]() { return tls_read_line(cfd, *tls, *cb); }, cfg);
         }).detach();
     }
+
+    LOG_INFO("[*] Server shut down gracefully.");
+    close(server_fd);
 }
 
 void reset_server_state()
