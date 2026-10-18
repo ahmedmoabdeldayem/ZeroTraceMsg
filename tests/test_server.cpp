@@ -251,12 +251,16 @@ int main()
         start_server_tls(cfg);
     }).detach();
     // Log-to-file server: covers log_level=debug and log_format=json paths
+    // Uses its own cert paths to avoid racing with the TEST_TLS_PORT server over
+    // "certs/server.cert.pem" (both would otherwise use the default path).
     std::thread([] {
         Config cfg;
         cfg.server_port = TEST_LOG_FILE_PORT;
         cfg.log_level = "debug";
         cfg.log_format = "json";
         cfg.log_file = "/tmp/ztm_test_server.log";
+        cfg.cert_path = "/tmp/ztm_logfile.cert.pem";
+        cfg.key_path = "/tmp/ztm_logfile.key.pem";
         start_server_tls(cfg);
     }).detach();
     // Fresh-cert server: covers ensure_server_cert generation (delete files first)
