@@ -116,12 +116,14 @@ coverage: clean $(TESTS)
 	@LLVM_PROFILE_FILE="$(BUILD)/test_protocol.profraw"  ./$(BUILD)/test_protocol
 	@LLVM_PROFILE_FILE="$(BUILD)/test_replay.profraw"    ./$(BUILD)/test_replay
 	@LLVM_PROFILE_FILE="$(BUILD)/test_server.profraw"    ./$(BUILD)/test_server
+	@LLVM_PROFILE_FILE="$(BUILD)/test_config.profraw"    ./$(BUILD)/test_config
 	$(LLVM_PROFDATA) merge -sparse \
 	    $(BUILD)/test_identity.profraw \
 	    $(BUILD)/test_crypto.profraw \
 	    $(BUILD)/test_protocol.profraw \
 	    $(BUILD)/test_replay.profraw \
 	    $(BUILD)/test_server.profraw \
+	    $(BUILD)/test_config.profraw \
 	    -o coverage.profdata
 	@echo ""
 	@echo "=== Coverage summary ==="
@@ -130,8 +132,10 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_protocol \
 	    -object $(BUILD)/test_replay \
 	    -object $(BUILD)/test_server \
+	    -object $(BUILD)/test_config \
 	    -instr-profile=coverage.profdata \
-	    common/identity.cpp common/crypto.cpp common/replay.hpp $(SERVER_SRC)
+	    common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
+	    common/replay.hpp $(SERVER_SRC)
 	@echo ""
 	@echo "=== Generating HTML report ==="
 	$(LLVM_COV) show $(BUILD)/test_identity \
@@ -139,11 +143,13 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_protocol \
 	    -object $(BUILD)/test_replay \
 	    -object $(BUILD)/test_server \
+	    -object $(BUILD)/test_config \
 	    -instr-profile=coverage.profdata \
 	    -format=html \
 	    -output-dir=coverage_report \
 	    -show-line-counts-or-regions \
-	    common/identity.cpp common/crypto.cpp common/replay.hpp $(SERVER_SRC)
+	    common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
+	    common/replay.hpp $(SERVER_SRC)
 	@echo ""
 	@echo "Coverage report: coverage_report/index.html"
 
