@@ -149,6 +149,7 @@ jobs:
             -object build/test_replay \
             -object build/test_server \
             -object build/test_config \
+            -object build/test_properties \
             -instr-profile=coverage.profdata \
             common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
             common/replay.hpp server/server.cpp \
@@ -174,6 +175,7 @@ jobs:
               -object build/test_replay \
               -object build/test_server \
               -object build/test_config \
+              -object build/test_properties \
               -instr-profile=coverage.profdata \
               common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
               common/replay.hpp server/server.cpp

@@ -21,8 +21,14 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     auto hkdf_ext = Botan::KDF::create_or_throw(hkdf_extract);
     auto hkdf_exp = Botan::KDF::create_or_throw(hkdf_expand);
 
+    // Bind derivation to the intended recipient's public key by including it
+    // in the HKDF-Extract salt alongside the KEM ciphertext.  This ensures
+    // decryption with a different identity always produces a distinct key,
+    // regardless of what the underlying KEM returns.
+    std::vector<uint8_t> hkdf_salt(kem.ciphertext.begin(), kem.ciphertext.end());
+    hkdf_salt.insert(hkdf_salt.end(), recipient_pubkey.begin(), recipient_pubkey.end());
     Botan::secure_vector<uint8_t> prk =
-        hkdf_ext->derive_key(32, kem.shared_secret, kem.ciphertext, std::vector<uint8_t>{});
+        hkdf_ext->derive_key(32, kem.shared_secret, hkdf_salt, std::vector<uint8_t>{});
 
     auto aes_key_bytes =
         hkdf_exp->derive_key(cfg.botan_key_len(), prk, std::vector<uint8_t>{},
@@ -89,8 +95,10 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
     auto hkdf_ext = Botan::KDF::create_or_throw(hkdf_extract);
     auto hkdf_exp = Botan::KDF::create_or_throw(hkdf_expand);
 
+    std::vector<uint8_t> hkdf_salt(kem_ct.begin(), kem_ct.end());
+    hkdf_salt.insert(hkdf_salt.end(), id.pubkey_bytes.begin(), id.pubkey_bytes.end());
     Botan::secure_vector<uint8_t> prk =
-        hkdf_ext->derive_key(32, shared_secret, kem_ct, std::vector<uint8_t>{});
+        hkdf_ext->derive_key(32, shared_secret, hkdf_salt, std::vector<uint8_t>{});
 
     auto aes_key_bytes =
         hkdf_exp->derive_key(cfg.botan_key_len(), prk, std::vector<uint8_t>{},
