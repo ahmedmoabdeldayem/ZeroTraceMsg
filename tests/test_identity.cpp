@@ -99,6 +99,63 @@ int main()
     }
 
     // -------------------------------------------------------
+    // Passphrase KDF — production parameters
+    // Argon2id: m=65536 KB (64 MB), t=3 passes, p=1 thread  ~200-500 ms
+    // PBKDF2:   600 000 iterations                           ~200-400 ms
+    // -------------------------------------------------------
+    TEST("Argon2id (m=65536, t=3, p=1): save/load round-trip");
+    {
+        Config argon_cfg;
+        argon_cfg.passphrase_kdf = "Argon2id";
+        argon_cfg.passphrase_kdf_memory_kb = 65536;
+        argon_cfg.passphrase_kdf_cost = 3;
+        argon_cfg.passphrase_kdf_parallelism = 1;
+
+        auto id = generate_identity(rng, argon_cfg);
+        save_identity(id, make_secure("strong-passphrase"), tmp_file, rng, argon_cfg);
+        auto loaded = load_identity(make_secure("strong-passphrase"), tmp_file, argon_cfg);
+        ASSERT_EQ(id.user_id, loaded.user_id);
+        ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
+    }
+
+    TEST("Argon2id (m=65536, t=3, p=1): wrong passphrase throws");
+    {
+        Config argon_cfg;
+        argon_cfg.passphrase_kdf = "Argon2id";
+        argon_cfg.passphrase_kdf_memory_kb = 65536;
+        argon_cfg.passphrase_kdf_cost = 3;
+        argon_cfg.passphrase_kdf_parallelism = 1;
+
+        auto id = generate_identity(rng, argon_cfg);
+        save_identity(id, make_secure("correct"), tmp_file, rng, argon_cfg);
+        ASSERT_THROWS(load_identity(make_secure("wrong"), tmp_file, argon_cfg));
+    }
+
+    TEST("PBKDF2 (600000 iterations): save/load round-trip");
+    {
+        Config pbkdf2_cfg;
+        pbkdf2_cfg.passphrase_kdf = "PBKDF2";
+        pbkdf2_cfg.passphrase_kdf_cost = 600000;
+
+        auto id = generate_identity(rng, pbkdf2_cfg);
+        save_identity(id, make_secure("strong-passphrase"), tmp_file, rng, pbkdf2_cfg);
+        auto loaded = load_identity(make_secure("strong-passphrase"), tmp_file, pbkdf2_cfg);
+        ASSERT_EQ(id.user_id, loaded.user_id);
+        ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
+    }
+
+    TEST("PBKDF2 (600000 iterations): wrong passphrase throws");
+    {
+        Config pbkdf2_cfg;
+        pbkdf2_cfg.passphrase_kdf = "PBKDF2";
+        pbkdf2_cfg.passphrase_kdf_cost = 600000;
+
+        auto id = generate_identity(rng, pbkdf2_cfg);
+        save_identity(id, make_secure("correct"), tmp_file, rng, pbkdf2_cfg);
+        ASSERT_THROWS(load_identity(make_secure("wrong"), tmp_file, pbkdf2_cfg));
+    }
+
+    // -------------------------------------------------------
     // SecureString / make_secure
     // -------------------------------------------------------
     TEST("make_secure from string literal holds correct bytes");
