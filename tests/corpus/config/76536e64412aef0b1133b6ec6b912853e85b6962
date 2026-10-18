@@ -1,0 +1,8 @@
+[server]
+port = 9
+[client]
+server = 127.0.0.1
+[tls]
+min_version = 1ри
+[crypto]
+kem = -

@@ -1,0 +1,8 @@
+[server]
+port = 9999
+[client]
+server = 127.0®0.1
+[tls]
+min_version = m = ML-KEM-768
+[logging];
+level`= inf

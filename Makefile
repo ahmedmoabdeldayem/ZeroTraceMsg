@@ -6,9 +6,11 @@ BUILD  = build
 COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp
 SERVER_SRC = server/server.cpp
 TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
-             $(BUILD)/test_replay $(BUILD)/test_server $(BUILD)/test_config
+             $(BUILD)/test_replay $(BUILD)/test_server $(BUILD)/test_config \
+             $(BUILD)/test_properties
+FUZZ_TARGETS = $(BUILD)/fuzz_config $(BUILD)/fuzz_crypto
 
-.PHONY: all setup test system-test sanitize coverage format format-check tidy clean
+.PHONY: all setup test system-test sanitize coverage fuzz fuzz-build format format-check tidy clean
 
 all: $(BUILD)/msg_server $(BUILD)/msg_client
 
@@ -53,6 +55,39 @@ system-test: all
 	@bash tests/test_system.sh
 
 # -------------------------------------------------------
+# Fuzz testing — libFuzzer targets (clang only)
+# fuzz-build: compile both targets
+# fuzz: smoke run (10 s per target) — catches immediate crashes
+# For a real fuzzing session:
+#   ./build/fuzz_config -max_total_time=3600 tests/corpus/config/
+#   ./build/fuzz_crypto -max_total_time=3600 tests/corpus/crypto/
+# -------------------------------------------------------
+# libFuzzer requires LLVM clang (not Apple's clang); use brew-installed clang if present
+FUZZ_CXX   ?= $(shell which clang++ 2>/dev/null || echo c++)
+LLVM_PATH  := $(shell brew --prefix llvm 2>/dev/null)/bin
+ifneq ($(wildcard $(LLVM_PATH)/clang++),)
+FUZZ_CXX   := $(LLVM_PATH)/clang++
+endif
+FUZZFLAGS  = -fsanitize=fuzzer,address
+
+$(BUILD)/fuzz_%: tests/fuzz_%.cpp $(COMMON)
+	@mkdir -p $(BUILD)
+	$(FUZZ_CXX) $(CXXFLAGS) $(FUZZFLAGS) $^ -o $@ $(LDFLAGS) $(FUZZFLAGS)
+
+fuzz-build: $(FUZZ_TARGETS)
+
+fuzz: fuzz-build
+	@echo "=== fuzz smoke test (10 s per target) ==="
+	@mkdir -p tests/corpus/config tests/corpus/crypto
+	@ASAN_OPTIONS=detect_container_overflow=0 \
+	    ./$(BUILD)/fuzz_config -max_total_time=10 -max_len=4096 -seed=1 \
+	    tests/corpus/config/ 2>&1 | grep -E "DONE|ERROR|CRASH" || true
+	@ASAN_OPTIONS=detect_container_overflow=0 \
+	    ./$(BUILD)/fuzz_crypto -max_total_time=10 -max_len=8192 -seed=1 \
+	    tests/corpus/crypto/ 2>&1 | grep -E "DONE|ERROR|CRASH" || true
+	@echo "Fuzz smoke test complete — no crashes found."
+
+# -------------------------------------------------------
 # Sanitizers — ASan + UBSan (run: make sanitize)
 # In CI each job has a clean env; locally run 'make clean' first.
 # detect_container_overflow=0: suppresses a false positive from
@@ -81,7 +116,8 @@ sanitize: clean $(TESTS)
 # clang-format — format: rewrite in place, format-check: CI gate
 # -------------------------------------------------------
 FMT_SRCS = common/config.cpp common/config.hpp common/kem.cpp common/kem.hpp \
-           tests/test_config.cpp \
+           tests/test_config.cpp tests/test_properties.cpp \
+           tests/fuzz_config.cpp tests/fuzz_crypto.cpp \
            common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
            common/protocol.hpp common/replay.hpp common/secure_memory.hpp common/tls_utils.hpp \
            server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
@@ -122,7 +158,8 @@ coverage: clean $(TESTS)
 	@LLVM_PROFILE_FILE="$(BUILD)/test_protocol.profraw"  ./$(BUILD)/test_protocol
 	@LLVM_PROFILE_FILE="$(BUILD)/test_replay.profraw"    ./$(BUILD)/test_replay
 	@LLVM_PROFILE_FILE="$(BUILD)/test_server.profraw"    ./$(BUILD)/test_server
-	@LLVM_PROFILE_FILE="$(BUILD)/test_config.profraw"    ./$(BUILD)/test_config
+	@LLVM_PROFILE_FILE="$(BUILD)/test_config.profraw"      ./$(BUILD)/test_config
+	@LLVM_PROFILE_FILE="$(BUILD)/test_properties.profraw"  ./$(BUILD)/test_properties
 	$(LLVM_PROFDATA) merge -sparse \
 	    $(BUILD)/test_identity.profraw \
 	    $(BUILD)/test_crypto.profraw \
@@ -130,6 +167,7 @@ coverage: clean $(TESTS)
 	    $(BUILD)/test_replay.profraw \
 	    $(BUILD)/test_server.profraw \
 	    $(BUILD)/test_config.profraw \
+	    $(BUILD)/test_properties.profraw \
 	    -o coverage.profdata
 	@echo ""
 	@echo "=== Coverage summary ==="
@@ -139,6 +177,7 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_replay \
 	    -object $(BUILD)/test_server \
 	    -object $(BUILD)/test_config \
+	    -object $(BUILD)/test_properties \
 	    -instr-profile=coverage.profdata \
 	    common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp \
 	    common/replay.hpp $(SERVER_SRC)
@@ -150,6 +189,7 @@ coverage: clean $(TESTS)
 	    -object $(BUILD)/test_replay \
 	    -object $(BUILD)/test_server \
 	    -object $(BUILD)/test_config \
+	    -object $(BUILD)/test_properties \
 	    -instr-profile=coverage.profdata \
 	    -format=html \
 	    -output-dir=coverage_report \

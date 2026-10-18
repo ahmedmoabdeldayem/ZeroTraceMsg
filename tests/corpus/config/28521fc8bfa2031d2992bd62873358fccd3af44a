@@ -1,0 +1,9 @@
+[server]
+port = 9999
+[client]
+server = 0.1
+[tls]
+min_version = mirsion = 1.3
+[crypto]
+kem = ML-KEM-768
+[l= info

@@ -1,0 +1,8 @@
+[server]
+port = 7310
+[client]
+server =3
+[crypto]
+kem = ML-KEM-768
+[logging]
+level = info

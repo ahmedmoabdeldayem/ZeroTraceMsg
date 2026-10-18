@@ -1,0 +1,9 @@
+[server]
+port = 9999
+[client]
+server = 127.0.1
+[tls]
+min_version = 1.3
+[[rypto]
+kem = ML-KEM-768
+[lggi¿l = info

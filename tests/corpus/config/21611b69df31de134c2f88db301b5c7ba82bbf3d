@@ -1,0 +1,10 @@
+[server]
+port = 9999
+[client]
+server = 127.0.0.68
+[logging]
+level = 1268
+[logging]
+level =gging]
+level = ino]
+kem = ML-KEM-7efo
