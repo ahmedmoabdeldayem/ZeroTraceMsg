@@ -6,7 +6,7 @@ BUILD  = build
 COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.cpp
 SERVER_SRC = server/server.cpp
 TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
-             $(BUILD)/test_replay $(BUILD)/test_server
+             $(BUILD)/test_replay $(BUILD)/test_server $(BUILD)/test_config
 
 .PHONY: all setup test sanitize coverage format format-check tidy clean
 
@@ -75,6 +75,7 @@ sanitize: clean $(TESTS)
 # clang-format — format: rewrite in place, format-check: CI gate
 # -------------------------------------------------------
 FMT_SRCS = common/config.cpp common/config.hpp common/kem.cpp common/kem.hpp \
+           tests/test_config.cpp \
            common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
            common/protocol.hpp common/replay.hpp common/secure_memory.hpp common/tls_utils.hpp \
            server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
