@@ -1,0 +1,8 @@
+[server]
+port = 7310
+[client]
+server = 120.0.1
+[tls]
+min_version = 1.3
+[crypto]
+kem = EL-K[serverE

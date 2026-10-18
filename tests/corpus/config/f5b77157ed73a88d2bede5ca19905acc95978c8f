@@ -1,0 +1,5 @@
+[server]
+port =5
+
+[ciient]
+serve1.= i

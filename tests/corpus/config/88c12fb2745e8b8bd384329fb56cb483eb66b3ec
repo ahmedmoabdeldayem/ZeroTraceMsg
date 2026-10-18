@@ -1,0 +1,6 @@
+[server]
+port= 9999
+[client]
+server = 127.0.0.1
+[tls]
+min_version = 1.2ver
