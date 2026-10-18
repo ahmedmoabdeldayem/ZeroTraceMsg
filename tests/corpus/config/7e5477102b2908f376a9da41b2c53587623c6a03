@@ -1,0 +1,11 @@
+[server]
+port = 9999
+[client]
+server = 127.0.0.1
+[tls]
+min_version = 0.3
+[crypto]
+kem = ML-JEM-768
+[logging]
+level = 
+o

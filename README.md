@@ -1,23 +1,57 @@
 # ZeroTraceMsg
 
-A secure CLI messaging app built on [Botan](https://github.com/randombit/botan).
+[![CI](https://github.com/ahmedmoabdeldayem/ZeroTraceMsg/actions/workflows/ci.yml/badge.svg)](https://github.com/ahmedmoabdeldayem/ZeroTraceMsg/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/ahmedmoabdeldayem/ZeroTraceMsg/actions/workflows/codeql.yml/badge.svg)](https://github.com/ahmedmoabdeldayem/ZeroTraceMsg/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Messages are end-to-end encrypted and auto-delete after the recipient reads them. The server cannot read message content or any metadata sealed inside the ciphertext.
+A secure CLI messaging application built on [Botan](https://github.com/randombit/botan).
+
+Messages are end-to-end encrypted and auto-delete after delivery. The server cannot read message content or the sender's identity.
 
 ---
 
 ## Security Properties
 
-- **End-to-end encrypted** — hybrid encryption (ML-KEM-768 + HKDF + AES-256-GCM) per message; quantum-resistant key encapsulation
-- **Sealed sender** — sender identity is encrypted inside the message; server only knows the recipient
-- **Ephemeral encapsulation** — a fresh ML-KEM ciphertext is generated for every message; the shared secret is never reused
-- **Replay protection** — each message carries a random 16-byte nonce sealed inside the ciphertext; the client tracks seen nonces and silently drops any blob it has already delivered
+- **End-to-end encrypted** — per-message hybrid encryption using a configurable KEM + HKDF + AEAD cipher (default: ML-KEM-768 + AES-256-GCM, quantum-resistant)
+- **Sealed sender** — sender identity is encrypted inside the message; the server only knows the recipient
+- **Ephemeral key encapsulation** — a fresh ciphertext is generated for every message; no shared secret is ever reused
+- **Replay protection** — each message carries a sealed random nonce; the client silently drops any blob it has already seen
 - **Auto-delete** — messages are wiped from the client after 2 minutes and from the server after 48 hours if unread
-- **Anonymous identity** — user ID is derived from a public key hash, no name or phone number required
-- **Session tokens** — server issues a random token on registration; no passwords stored server-side
-- **Memory locking** — key material is locked in RAM with `mlock()` to prevent the OS from swapping it to disk
-- **Fixed-size blobs** — all messages are padded to a fixed 4 KB plaintext before encryption; the server cannot infer message length from blob size
-- **TLS transport** — the TCP connection is wrapped in TLS; session tokens, recipient IDs, and message timing are hidden from network observers
+- **Anonymous identity** — user ID derived from a public key hash; no name, email, or phone number required
+- **Session tokens** — 256-bit random tokens issued on REGISTER; comparison is constant-time
+- **Memory locking** — private key material locked with `mlock()` to prevent swapping to disk
+- **Fixed-size blobs** — all messages padded to a fixed plaintext size before encryption; server cannot infer message length
+- **TLS transport** — all connections wrapped in TLS (configurable: 1.2 or 1.3); session tokens, recipient IDs, and timing are hidden from network observers
+- **Configurable KEM** — operators choose from 12 supported algorithms (see table below)
+
+---
+
+## Supported Algorithms
+
+### Key Encapsulation (KEM)
+
+| Algorithm | Type | Security | Notes |
+|---|---|---|---|
+| `ML-KEM-768` | Post-quantum | 192-bit | **Default** — NIST PQC standard |
+| `ML-KEM-512` | Post-quantum | 128-bit | Smaller keys |
+| `ML-KEM-1024` | Post-quantum | 256-bit | Larger keys |
+| `HYBRID-P256-ML-KEM-768` | Hybrid | Classical + PQ | Belt-and-suspenders |
+| `HYBRID-P384-ML-KEM-1024` | Hybrid | Classical + PQ | Stronger hybrid |
+| `HYBRID-X25519-ML-KEM-768` | Hybrid | Classical + PQ | X25519 + post-quantum |
+| `X25519` | Classical | 128-bit | Used in TLS 1.3 and Signal |
+| `ECDH-P256` | Classical | 128-bit | NIST P-256 |
+| `ECDH-P384` | Classical | 192-bit | NIST P-384 |
+| `RSA-2048` | Classical | 112-bit | Legacy |
+| `RSA-3072` | Classical | 128-bit | Legacy |
+| `RSA-4096` | Classical | 140-bit | Legacy |
+
+### Symmetric Cipher
+
+`AES-256-GCM` (default) · `AES-128-GCM` · `ChaCha20Poly1305`
+
+### Hash (HKDF)
+
+`SHA-256` (default) · `SHA-384` · `SHA-512` · `SHA3-256`
 
 ---
 
@@ -47,12 +81,46 @@ make setup
 make all
 ```
 
-**4. Run tests (optional):**
+**4. Run tests:**
 ```bash
-make test          # run all test suites
+make test          # 1186 tests across 6 suites
+make system-test   # binary-level tests (starts actual executables)
 make sanitize      # rerun under ASan + UBSan
 make coverage      # LLVM coverage report → coverage_report/index.html
 ```
+
+---
+
+## Configuration
+
+All operator settings live in `zerotrace.conf` in the directory you run the binary from. The file is committed with defaults and full documentation.
+
+```bash
+./build/msg_server                          # loads ./zerotrace.conf
+./build/msg_server /etc/zerotrace.conf      # explicit path
+./build/msg_client alice 127.0.0.1          # loads ./zerotrace.conf
+./build/msg_client alice host --config /path/to/zerotrace.conf
+```
+
+Key settings:
+
+```ini
+[server]
+port              = 9999
+max_users         = 0         ; 0 = unlimited
+session_ttl_hours = 24
+
+[crypto]
+kem    = ML-KEM-768           ; see supported algorithms above
+cipher = AES-256-GCM
+hash   = SHA-256
+
+[logging]
+level  = info                 ; debug | info | warn | error
+format = text                 ; text | json
+```
+
+See `zerotrace.conf` for the complete reference with all options and valid values.
 
 ---
 
@@ -73,7 +141,7 @@ make coverage      # LLVM coverage report → coverage_report/index.html
 ./build/msg_client bob 127.0.0.1
 ```
 
-Your user ID is shown at the top of the screen when you connect. Share it with the other person out of band.
+Your user ID is shown at the top of the screen. Share it with the other person out of band.
 
 ---
 
@@ -97,7 +165,7 @@ Your user ID is shown at the top of the screen when you connect. Share it with t
 > add <recipient_id> alice
 ```
 
-**Send using nickname:**
+**Send using a nickname:**
 ```
 > alice hello
 ```
@@ -114,28 +182,44 @@ Your user ID is shown at the top of the screen when you connect. Share it with t
 ```
 ZeroTraceMsg/
 ├── common/
-│   ├── crypto.hpp/cpp         Hybrid encryption (ML-KEM-768 + HKDF + AES-256-GCM)
-│   ├── identity.hpp/cpp       Key generation, save/load, user ID derivation
-│   ├── protocol.hpp           Shared constants (port, limits, wire format)
-│   ├── replay.hpp             Replay-nonce tracking (in-memory seen set)
+│   ├── config.hpp/cpp         Operator configuration — INI parser, validation, derived helpers
+│   ├── kem.hpp/cpp            KEM abstraction — ECDH, X25519, ML-KEM, RSA, Hybrid modes
+│   ├── crypto.hpp/cpp         Hybrid encryption pipeline (KEM + HKDF + AEAD)
+│   ├── identity.hpp/cpp       Key generation, save/load (Argon2id/PBKDF2 protected)
+│   ├── protocol.hpp           Shared constants (wire format, limits)
+│   ├── replay.hpp             Replay-nonce tracking
 │   └── secure_memory.hpp      SecureString — zeroed on destruction
 ├── server/
-│   ├── server.hpp/cpp         Protocol handler, token auth, message routing
-│   └── main.cpp               Entry point — binds port, accepts connections
-├── client/main.cpp            CLI interface, polling loop, ANSI display
-├── tests/                     Unit and integration test suites
-├── build/                     Compiled binaries (generated)
-├── botan-src/                 Botan cryptography library (git submodule)
-├── include/                   Botan headers (generated by make setup)
-└── lib/                       Botan library (generated by make setup)
+│   ├── server.hpp/cpp         Protocol handler, token auth, rate limiting, message routing
+│   └── main.cpp               Entry point — loads config, starts TLS server
+├── client/main.cpp            CLI, TLS client, polling loop, contacts, ANSI display
+├── tests/
+│   ├── test_config.cpp        879 tests — config, all KEM x cipher x hash combos (144 total)
+│   ├── test_identity.cpp       78 tests — key gen, save/load, all KEMs, KDF variants
+│   ├── test_crypto.cpp         25 tests — encrypt/decrypt, tamper detection
+│   ├── test_protocol.cpp       16 tests — full send/receive pipeline
+│   ├── test_replay.cpp        116 tests — nonce deduplication, thread safety
+│   ├── test_server.cpp         72 tests — server protocol over plain TCP and TLS
+│   └── test_system.sh              — binary-level system tests (actual executables)
+├── zerotrace.conf             Documented default configuration
+├── CHANGELOG.md               Version history
+├── CONTRIBUTING.md            Development workflow
+└── SECURITY.md                Vulnerability reporting policy
 ```
 
 ---
 
 ## Known Limitations
 
-- **IP visibility** — the server sees client IP addresses and recipient user IDs. Use a VPN or Tor to hide network identity
-- **TLS certificate not pinned** — the client accepts any self-signed certificate, so a network attacker could MITM the TLS connection. Pin `certs/server.cert.pem` for production use
-- **Unverified display names** — usernames are self-declared inside the encrypted payload; anyone can claim any name
-- **Contacts file is plaintext** — the `users/<name>.contacts` file stores ID-to-nickname mappings unencrypted; it leaks your social graph on a shared machine
-- **Delivery confirmation is approximate** — `[delivered]` appears when the recipient's client polls and retrieves the message, not at the moment they read it
+- **IP visibility** — the server sees client IP addresses and recipient user IDs
+- **TLS certificate not pinned** — the client accepts any self-signed certificate; pin `certs/server.cert.pem` for production
+- **Unverified usernames** — display names are self-declared inside the encrypted payload
+- **Contacts file is plaintext** — `users/<name>.contacts` leaks your social graph on a shared machine
+- **Delivery confirmation is approximate** — `[delivered]` appears when the recipient polls, not when they read
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+Security issues: see [SECURITY.md](SECURITY.md) — **do not open public issues for vulnerabilities**.

@@ -1,0 +1,16 @@
+[server]
+port = 9999
+[client]
+server = 127.0.0.1
+[tls]
+min_version= 99r = 127.0.0.1
+[tls]
+min_version=t = 9999
+[client]
+server = 127.0.0.1
+[tls]
+min_version= 9927.0.0.1
+[tls]
+min_version=tls2
+mÿÿÿkersitls2
+min_version = 
