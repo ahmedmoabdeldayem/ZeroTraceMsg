@@ -138,9 +138,11 @@ static void send_line(int /*fd*/, const std::string& line) { tls_send_line(*g_tl
 static std::string read_line(int fd) { return tls_read_line(fd, *g_tls_conn, *g_tls_cb); }
 
 // TLS policy that honours tls_min_version from config
-class ClientTlsPolicy : public Botan::TLS::Policy {
+class ClientTlsPolicy : public Botan::TLS::Policy
+{
     bool allow_tls12_;
-public:
+
+  public:
     explicit ClientTlsPolicy(bool allow_tls12) : allow_tls12_(allow_tls12) {}
     bool allow_tls12() const override { return allow_tls12_; }
 };
@@ -151,14 +153,14 @@ static int connect_to_server(const std::string& ip)
 
     // Connection timeout via SO_RCVTIMEO / SO_SNDTIMEO
     struct timeval tv;
-    tv.tv_sec  = g_cfg.connection_timeout_s;
+    tv.tv_sec = g_cfg.connection_timeout_s;
     tv.tv_usec = 0;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port   = htons(static_cast<uint16_t>(g_cfg.client_port));
+    addr.sin_port = htons(static_cast<uint16_t>(g_cfg.client_port));
     inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
     if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         close(fd);
@@ -169,8 +171,8 @@ static int connect_to_server(const std::string& ip)
     auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
     g_tls_cb = std::make_shared<ClientCallbacks>(fd);
     auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
-    auto creds       = std::make_shared<ClientCredentials>();
-    auto policy      = std::make_shared<ClientTlsPolicy>(g_cfg.tls_min_version == "1.2");
+    auto creds = std::make_shared<ClientCredentials>();
+    auto policy = std::make_shared<ClientTlsPolicy>(g_cfg.tls_min_version == "1.2");
 
     g_tls_conn = std::make_shared<Botan::TLS::Client>(
         g_tls_cb, session_mgr, creds, policy, std::shared_ptr<Botan::RandomNumberGenerator>(rng),
@@ -213,19 +215,19 @@ static void check_server_crypto(const std::string& resp_tail)
     std::string tok;
     while (ss >> tok) {
         auto eq = tok.find('=');
-        if (eq == std::string::npos) continue;
+        if (eq == std::string::npos)
+            continue;
         std::string key = tok.substr(0, eq);
         std::string val = tok.substr(eq + 1);
-        if (key == "kem"    && val != g_cfg.kem)
-            std::cerr << "\n[warning] server kem=" << val
-                      << " but client kem=" << g_cfg.kem
+        if (key == "kem" && val != g_cfg.kem)
+            std::cerr << "\n[warning] server kem=" << val << " but client kem=" << g_cfg.kem
                       << " — messages will fail to decrypt\n";
         if (key == "cipher" && val != g_cfg.cipher)
             std::cerr << "\n[warning] server cipher=" << val
                       << " but client cipher=" << g_cfg.cipher << "\n";
-        if (key == "hash"   && val != g_cfg.hash)
-            std::cerr << "\n[warning] server hash=" << val
-                      << " but client hash=" << g_cfg.hash << "\n";
+        if (key == "hash" && val != g_cfg.hash)
+            std::cerr << "\n[warning] server hash=" << val << " but client hash=" << g_cfg.hash
+                      << "\n";
     }
 }
 
@@ -613,7 +615,8 @@ int main(int argc, char* argv[])
                     // guard against exceeding PADDED_PLAINTEXT_LEN
                     constexpr size_t fixed_overhead = MSG_NONCE_LEN + USER_ID_LEN + 1 + 2;
                     size_t name_bytes = std::min(username_local.size(), size_t(255));
-                    if (text.size() + fixed_overhead + name_bytes > g_cfg.padded_plaintext_bytes()) {
+                    if (text.size() + fixed_overhead + name_bytes >
+                        g_cfg.padded_plaintext_bytes()) {
                         std::cout << "\n[message too long — max "
                                   << (g_cfg.padded_plaintext_bytes() - fixed_overhead - name_bytes)
                                   << " bytes]\n";

@@ -79,8 +79,7 @@ int main()
         auto alice = generate_identity(rng, cfg);
         auto bob = generate_identity(rng, cfg);
 
-        auto blob =
-            encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob = encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
         auto dec = decrypt_message(blob, bob, rng, cfg);
         ASSERT_TRUE(guard.check_and_insert(dec.msg_nonce));
     }
@@ -91,8 +90,7 @@ int main()
         auto alice = generate_identity(rng, cfg);
         auto bob = generate_identity(rng, cfg);
 
-        auto blob =
-            encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob = encrypt_message("hello", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
 
         // first delivery — accepted
         auto dec1 = decrypt_message(blob, bob, rng, cfg);
@@ -109,10 +107,8 @@ int main()
         auto alice = generate_identity(rng, cfg);
         auto bob = generate_identity(rng, cfg);
 
-        auto blob1 =
-            encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
-        auto blob2 =
-            encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob1 = encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob2 = encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
 
         auto dec1 = decrypt_message(blob1, bob, rng, cfg);
         auto dec2 = decrypt_message(blob2, bob, rng, cfg);

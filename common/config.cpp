@@ -92,23 +92,22 @@ void Config::validate() const
         throw std::invalid_argument("tls.cert_validity_days must be >= 1");
 
     // crypto — kem
-    static const std::set<std::string> valid_kem = {
-        "ECDH-P256", "ECDH-P384",
-        "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024",
-        "HYBRID-P256-ML-KEM-768", "HYBRID-P384-ML-KEM-1024"
-    };
+    static const std::set<std::string> valid_kem = {"ECDH-P256",
+                                                    "ECDH-P384",
+                                                    "ML-KEM-512",
+                                                    "ML-KEM-768",
+                                                    "ML-KEM-1024",
+                                                    "HYBRID-P256-ML-KEM-768",
+                                                    "HYBRID-P384-ML-KEM-1024"};
     if (!valid_kem.count(kem))
         throw std::invalid_argument("crypto.kem: unknown value '" + kem + "'");
 
-    static const std::set<std::string> valid_cipher = {
-        "AES-256-GCM", "AES-128-GCM", "ChaCha20Poly1305"
-    };
+    static const std::set<std::string> valid_cipher = {"AES-256-GCM", "AES-128-GCM",
+                                                       "ChaCha20Poly1305"};
     if (!valid_cipher.count(cipher))
         throw std::invalid_argument("crypto.cipher: unknown value '" + cipher + "'");
 
-    static const std::set<std::string> valid_hash = {
-        "SHA-256", "SHA-384", "SHA-512", "SHA3-256"
-    };
+    static const std::set<std::string> valid_hash = {"SHA-256", "SHA-384", "SHA-512", "SHA3-256"};
     if (!valid_hash.count(hash))
         throw std::invalid_argument("crypto.hash: unknown value '" + hash + "'");
 
@@ -181,51 +180,88 @@ Config Config::load(const std::string& path)
 
         try {
             if (section == "server") {
-                if      (key == "port")                  cfg.server_port          = parse_int(val, key);
-                else if (key == "bind_address")          cfg.server_bind          = val;
-                else if (key == "max_users")             cfg.max_users            = parse_int(val, key);
-                else if (key == "max_inbox_messages")    cfg.max_inbox_messages   = parse_int(val, key);
-                else if (key == "session_ttl_hours")     cfg.session_ttl_hours    = parse_int(val, key);
-                else if (key == "msg_ttl_hours")         cfg.msg_ttl_hours        = parse_int(val, key);
-                else if (key == "cleanup_interval_min")  cfg.cleanup_interval_min = parse_int(val, key);
-                else if (key == "rate_limit_msgs")       cfg.rate_limit_msgs      = parse_int(val, key);
-                else if (key == "rate_limit_window_s")   cfg.rate_limit_window_s  = parse_int(val, key);
-                else if (key == "cert_path")             cfg.cert_path            = val;
-                else if (key == "key_path")              cfg.key_path             = val;
-                else bad("unknown key in [server]: " + key);
+                if (key == "port")
+                    cfg.server_port = parse_int(val, key);
+                else if (key == "bind_address")
+                    cfg.server_bind = val;
+                else if (key == "max_users")
+                    cfg.max_users = parse_int(val, key);
+                else if (key == "max_inbox_messages")
+                    cfg.max_inbox_messages = parse_int(val, key);
+                else if (key == "session_ttl_hours")
+                    cfg.session_ttl_hours = parse_int(val, key);
+                else if (key == "msg_ttl_hours")
+                    cfg.msg_ttl_hours = parse_int(val, key);
+                else if (key == "cleanup_interval_min")
+                    cfg.cleanup_interval_min = parse_int(val, key);
+                else if (key == "rate_limit_msgs")
+                    cfg.rate_limit_msgs = parse_int(val, key);
+                else if (key == "rate_limit_window_s")
+                    cfg.rate_limit_window_s = parse_int(val, key);
+                else if (key == "cert_path")
+                    cfg.cert_path = val;
+                else if (key == "key_path")
+                    cfg.key_path = val;
+                else
+                    bad("unknown key in [server]: " + key);
 
             } else if (section == "client") {
-                if      (key == "server")                    cfg.client_server           = val;
-                else if (key == "port")                      cfg.client_port             = parse_int(val, key);
-                else if (key == "poll_interval_s")           cfg.poll_interval_s         = parse_int(val, key);
-                else if (key == "msg_ttl_s")                 cfg.msg_ttl_s               = parse_int(val, key);
-                else if (key == "identity_dir")              cfg.identity_dir            = val;
-                else if (key == "connection_timeout_s")      cfg.connection_timeout_s    = parse_int(val, key);
-                else if (key == "reconnect_on_disconnect")   cfg.reconnect_on_disconnect = parse_bool(val, key);
-                else bad("unknown key in [client]: " + key);
+                if (key == "server")
+                    cfg.client_server = val;
+                else if (key == "port")
+                    cfg.client_port = parse_int(val, key);
+                else if (key == "poll_interval_s")
+                    cfg.poll_interval_s = parse_int(val, key);
+                else if (key == "msg_ttl_s")
+                    cfg.msg_ttl_s = parse_int(val, key);
+                else if (key == "identity_dir")
+                    cfg.identity_dir = val;
+                else if (key == "connection_timeout_s")
+                    cfg.connection_timeout_s = parse_int(val, key);
+                else if (key == "reconnect_on_disconnect")
+                    cfg.reconnect_on_disconnect = parse_bool(val, key);
+                else
+                    bad("unknown key in [client]: " + key);
 
             } else if (section == "tls") {
-                if      (key == "min_version")       cfg.tls_min_version    = val;
-                else if (key == "cert_algorithm")    cfg.cert_algorithm     = val;
-                else if (key == "cert_validity_days") cfg.cert_validity_days = parse_int(val, key);
-                else bad("unknown key in [tls]: " + key);
+                if (key == "min_version")
+                    cfg.tls_min_version = val;
+                else if (key == "cert_algorithm")
+                    cfg.cert_algorithm = val;
+                else if (key == "cert_validity_days")
+                    cfg.cert_validity_days = parse_int(val, key);
+                else
+                    bad("unknown key in [tls]: " + key);
 
             } else if (section == "crypto") {
-                if      (key == "kem")                      cfg.kem                        = val;
-                else if (key == "cipher")                   cfg.cipher                     = val;
-                else if (key == "hash")                     cfg.hash                       = val;
-                else if (key == "padded_plaintext_kb")      cfg.padded_plaintext_kb        = parse_int(val, key);
-                else if (key == "passphrase_kdf")           cfg.passphrase_kdf             = val;
-                else if (key == "passphrase_kdf_cost")      cfg.passphrase_kdf_cost        = parse_int(val, key);
-                else if (key == "passphrase_kdf_memory_kb") cfg.passphrase_kdf_memory_kb   = parse_int(val, key);
-                else if (key == "passphrase_kdf_parallelism") cfg.passphrase_kdf_parallelism = parse_int(val, key);
-                else bad("unknown key in [crypto]: " + key);
+                if (key == "kem")
+                    cfg.kem = val;
+                else if (key == "cipher")
+                    cfg.cipher = val;
+                else if (key == "hash")
+                    cfg.hash = val;
+                else if (key == "padded_plaintext_kb")
+                    cfg.padded_plaintext_kb = parse_int(val, key);
+                else if (key == "passphrase_kdf")
+                    cfg.passphrase_kdf = val;
+                else if (key == "passphrase_kdf_cost")
+                    cfg.passphrase_kdf_cost = parse_int(val, key);
+                else if (key == "passphrase_kdf_memory_kb")
+                    cfg.passphrase_kdf_memory_kb = parse_int(val, key);
+                else if (key == "passphrase_kdf_parallelism")
+                    cfg.passphrase_kdf_parallelism = parse_int(val, key);
+                else
+                    bad("unknown key in [crypto]: " + key);
 
             } else if (section == "logging") {
-                if      (key == "level")   cfg.log_level  = val;
-                else if (key == "file")    cfg.log_file   = val;
-                else if (key == "format")  cfg.log_format = val;
-                else bad("unknown key in [logging]: " + key);
+                if (key == "level")
+                    cfg.log_level = val;
+                else if (key == "file")
+                    cfg.log_file = val;
+                else if (key == "format")
+                    cfg.log_format = val;
+                else
+                    bad("unknown key in [logging]: " + key);
 
             } else {
                 bad("unknown section [" + section + "]");

@@ -31,5 +31,4 @@ void save_identity(const Identity& id, const SecureString& passphrase, const std
                    Botan::AutoSeeded_RNG& rng, const Config& cfg);
 
 // Load identity from file. Throws on wrong passphrase or corrupt file.
-Identity load_identity(const SecureString& passphrase, const std::string& path,
-                       const Config& cfg);
+Identity load_identity(const SecureString& passphrase, const std::string& path, const Config& cfg);

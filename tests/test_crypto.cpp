@@ -22,8 +22,8 @@ int main()
     // -------------------------------------------------------
     TEST("encrypt/decrypt round-trip");
     {
-        auto blob =
-            encrypt_message("hello world", sender.user_id, "alice", recipient.pubkey_bytes, rng, cfg);
+        auto blob = encrypt_message("hello world", sender.user_id, "alice", recipient.pubkey_bytes,
+                                    rng, cfg);
         auto dec = decrypt_message(blob, recipient, rng, cfg);
         ASSERT_EQ(dec.plaintext, std::string("hello world"));
         ASSERT_EQ(dec.sender_id, sender.user_id);
@@ -200,7 +200,8 @@ int main()
     {
         constexpr size_t max_text = PADDED_PLAINTEXT_LEN - MSG_NONCE_LEN - USER_ID_LEN - 1 - 2;
         std::string too_big(max_text + 1, 'Z');
-        ASSERT_THROWS(encrypt_message(too_big, sender.user_id, "", recipient.pubkey_bytes, rng, cfg));
+        ASSERT_THROWS(
+            encrypt_message(too_big, sender.user_id, "", recipient.pubkey_bytes, rng, cfg));
     }
 
     TEST("decrypt_message with wrong blob size throws");

@@ -63,8 +63,7 @@ int main()
         auto bob = generate_identity(rng, cfg);
 
         std::string message = "hello bob, this is alice";
-        auto blob =
-            encrypt_message(message, alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob = encrypt_message(message, alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
 
         auto dec = decrypt_message(blob, bob, rng, cfg);
         ASSERT_EQ(dec.plaintext, message);
@@ -78,8 +77,7 @@ int main()
         auto bob = generate_identity(rng, cfg);
         auto carol = generate_identity(rng, cfg);
 
-        auto blob =
-            encrypt_message("secret", alice.user_id, "alice", carol.pubkey_bytes, rng, cfg);
+        auto blob = encrypt_message("secret", alice.user_id, "alice", carol.pubkey_bytes, rng, cfg);
         ASSERT_THROWS(decrypt_message(blob, bob, rng, cfg));
     }
 
@@ -88,10 +86,8 @@ int main()
         auto alice = generate_identity(rng, cfg);
         auto bob = generate_identity(rng, cfg);
 
-        auto blob1 =
-            encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
-        auto blob2 =
-            encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob1 = encrypt_message("msg1", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob2 = encrypt_message("msg2", alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
 
         // different ephemeral keys → completely different blobs
         ASSERT_NE(blob1, blob2);
@@ -108,8 +104,7 @@ int main()
         auto alice = generate_identity(rng, cfg);
         auto bob = generate_identity(rng, cfg);
         std::string unicode = "مرحبا بالعالم 🔒";
-        auto blob =
-            encrypt_message(unicode, alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
+        auto blob = encrypt_message(unicode, alice.user_id, "alice", bob.pubkey_bytes, rng, cfg);
         auto dec = decrypt_message(blob, bob, rng, cfg);
         ASSERT_EQ(dec.plaintext, unicode);
     }

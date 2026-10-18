@@ -20,7 +20,7 @@ std::string derive_user_id(const std::vector<uint8_t>& pubkey_bytes)
 Identity generate_identity(Botan::AutoSeeded_RNG& rng, const Config& cfg)
 {
     Identity id;
-    id.priv_key  = make_kem_key(rng, cfg);
+    id.priv_key = make_kem_key(rng, cfg);
     id.priv_key2 = make_kem_key2(rng, cfg); // null for non-hybrid
 
     // pubkey_bytes = primary_pub [ || secondary_pub ] for hybrid
@@ -54,8 +54,8 @@ static Botan::secure_vector<uint8_t> kdf_from_passphrase(const SecureString& pas
     }
 
     Botan::secure_vector<uint8_t> key(32);
-    pwhash->derive_key(key.data(), key.size(), passphrase.data(), passphrase.size(),
-                       salt.data(), salt.size());
+    pwhash->derive_key(key.data(), key.size(), passphrase.data(), passphrase.size(), salt.data(),
+                       salt.size());
     return key;
 }
 
@@ -64,10 +64,10 @@ static Botan::secure_vector<uint8_t> kdf_from_passphrase(const SecureString& pas
 void save_identity(const Identity& id, const SecureString& passphrase, const std::string& path,
                    Botan::AutoSeeded_RNG& rng, const Config& cfg)
 {
-    auto salt   = rng.random_vec(16);
-    auto nonce  = rng.random_vec(12);
-    auto aes_key = kdf_from_passphrase(passphrase,
-                                       std::span<const uint8_t>(salt.data(), salt.size()), cfg);
+    auto salt = rng.random_vec(16);
+    auto nonce = rng.random_vec(12);
+    auto aes_key =
+        kdf_from_passphrase(passphrase, std::span<const uint8_t>(salt.data(), salt.size()), cfg);
 
     // Collect raw private key material (primary [+ secondary for hybrid])
     auto raw = id.priv_key->raw_private_key_bits();
@@ -90,8 +90,7 @@ void save_identity(const Identity& id, const SecureString& passphrase, const std
     out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
 }
 
-Identity load_identity(const SecureString& passphrase, const std::string& path,
-                       const Config& cfg)
+Identity load_identity(const SecureString& passphrase, const std::string& path, const Config& cfg)
 {
     std::ifstream in(path, std::ios::binary);
     if (!in)
@@ -104,8 +103,8 @@ Identity load_identity(const SecureString& passphrase, const std::string& path,
     std::vector<char> raw_ct(std::istreambuf_iterator<char>(in), {});
     Botan::secure_vector<uint8_t> ciphertext(raw_ct.begin(), raw_ct.end());
 
-    auto aes_key = kdf_from_passphrase(passphrase,
-                                       std::span<const uint8_t>(salt.data(), salt.size()), cfg);
+    auto aes_key =
+        kdf_from_passphrase(passphrase, std::span<const uint8_t>(salt.data(), salt.size()), cfg);
 
     auto dec = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Decryption);
     dec->set_key(aes_key);
@@ -114,9 +113,8 @@ Identity load_identity(const SecureString& passphrase, const std::string& path,
 
     // Determine how many bytes belong to the primary key
     bool hybrid = (cfg.kem == "HYBRID-P256-ML-KEM-768" || cfg.kem == "HYBRID-P384-ML-KEM-1024");
-    size_t primary_bytes = hybrid
-        ? ((cfg.kem == "HYBRID-P256-ML-KEM-768") ? 32 : 48) // ECDH scalar
-        : ciphertext.size(); // all bytes for non-hybrid
+    size_t primary_bytes = hybrid ? ((cfg.kem == "HYBRID-P256-ML-KEM-768") ? 32 : 48) // ECDH scalar
+                                  : ciphertext.size(); // all bytes for non-hybrid
 
     std::span<const uint8_t> bytes1(ciphertext.data(), primary_bytes);
     Identity id;

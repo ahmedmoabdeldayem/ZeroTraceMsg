@@ -16,7 +16,7 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
 
     // Step 2 — HKDF: use KEM ciphertext as salt to bind derivation to this encapsulation
     std::string hkdf_extract = "HKDF-Extract(" + cfg.botan_hash() + ")";
-    std::string hkdf_expand  = "HKDF-Expand(" + cfg.botan_hash() + ")";
+    std::string hkdf_expand = "HKDF-Expand(" + cfg.botan_hash() + ")";
 
     auto hkdf_ext = Botan::KDF::create_or_throw(hkdf_extract);
     auto hkdf_exp = Botan::KDF::create_or_throw(hkdf_expand);
@@ -24,9 +24,9 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     Botan::secure_vector<uint8_t> prk =
         hkdf_ext->derive_key(32, kem.shared_secret, kem.ciphertext, std::vector<uint8_t>{});
 
-    auto aes_key_bytes = hkdf_exp->derive_key(
-        cfg.botan_key_len(), prk, std::vector<uint8_t>{},
-        std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
+    auto aes_key_bytes =
+        hkdf_exp->derive_key(cfg.botan_key_len(), prk, std::vector<uint8_t>{},
+                             std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
     auto nonce_bytes = hkdf_exp->derive_key(12, prk, std::vector<uint8_t>{},
                                             std::vector<uint8_t>{'a', 'e', 's', '-', 'i', 'v'});
 
@@ -34,8 +34,7 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     //   msg_nonce(16) + sender_id(16) + name_len(1) + sender_name
     //   + msg_len(2, big-endian) + message + zero-padding → PADDED_PLAINTEXT_LEN
     auto nonce_raw = rng.random_vec(MSG_NONCE_LEN);
-    uint8_t name_len =
-        static_cast<uint8_t>(sender_name.size() < 255 ? sender_name.size() : 255);
+    uint8_t name_len = static_cast<uint8_t>(sender_name.size() < 255 ? sender_name.size() : 255);
 
     size_t padded = cfg.padded_plaintext_bytes();
     constexpr size_t fixed_overhead = MSG_NONCE_LEN + USER_ID_LEN + 1 + 2;
@@ -55,7 +54,8 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     payload.resize(padded, 0);
 
     // Step 4 — AEAD encrypt (cipher from config)
-    auto aead = Botan::AEAD_Mode::create_or_throw(cfg.botan_cipher(), Botan::Cipher_Dir::Encryption);
+    auto aead =
+        Botan::AEAD_Mode::create_or_throw(cfg.botan_cipher(), Botan::Cipher_Dir::Encryption);
     aead->set_key(aes_key_bytes);
     aead->start(nonce_bytes);
     aead->finish(payload);
@@ -84,7 +84,7 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
 
     // Step 2 — HKDF (same derivation as encrypt)
     std::string hkdf_extract = "HKDF-Extract(" + cfg.botan_hash() + ")";
-    std::string hkdf_expand  = "HKDF-Expand(" + cfg.botan_hash() + ")";
+    std::string hkdf_expand = "HKDF-Expand(" + cfg.botan_hash() + ")";
 
     auto hkdf_ext = Botan::KDF::create_or_throw(hkdf_extract);
     auto hkdf_exp = Botan::KDF::create_or_throw(hkdf_expand);
@@ -92,14 +92,15 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
     Botan::secure_vector<uint8_t> prk =
         hkdf_ext->derive_key(32, shared_secret, kem_ct, std::vector<uint8_t>{});
 
-    auto aes_key_bytes = hkdf_exp->derive_key(
-        cfg.botan_key_len(), prk, std::vector<uint8_t>{},
-        std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
+    auto aes_key_bytes =
+        hkdf_exp->derive_key(cfg.botan_key_len(), prk, std::vector<uint8_t>{},
+                             std::vector<uint8_t>{'a', 'e', 's', '-', 'k', 'e', 'y'});
     auto nonce_bytes = hkdf_exp->derive_key(12, prk, std::vector<uint8_t>{},
                                             std::vector<uint8_t>{'a', 'e', 's', '-', 'i', 'v'});
 
     // Step 3 — AEAD decrypt
-    auto aead = Botan::AEAD_Mode::create_or_throw(cfg.botan_cipher(), Botan::Cipher_Dir::Decryption);
+    auto aead =
+        Botan::AEAD_Mode::create_or_throw(cfg.botan_cipher(), Botan::Cipher_Dir::Decryption);
     aead->set_key(aes_key_bytes);
     aead->start(nonce_bytes);
     aead->finish(ciphertext);
@@ -115,16 +116,15 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
     result.msg_nonce = std::vector<uint8_t>(ciphertext.begin(), ciphertext.begin() + MSG_NONCE_LEN);
     pos += MSG_NONCE_LEN;
 
-    result.sender_id = std::string(ciphertext.begin() + pos,
-                                   ciphertext.begin() + pos + USER_ID_LEN);
+    result.sender_id =
+        std::string(ciphertext.begin() + pos, ciphertext.begin() + pos + USER_ID_LEN);
     pos += USER_ID_LEN;
 
     uint8_t name_len = ciphertext[pos++];
     if (ciphertext.size() < pos + name_len + 2)
         throw std::runtime_error("Decrypted payload malformed");
 
-    result.sender_name = std::string(ciphertext.begin() + pos,
-                                     ciphertext.begin() + pos + name_len);
+    result.sender_name = std::string(ciphertext.begin() + pos, ciphertext.begin() + pos + name_len);
     pos += name_len;
 
     uint16_t msg_len = (static_cast<uint16_t>(ciphertext[pos]) << 8) | ciphertext[pos + 1];

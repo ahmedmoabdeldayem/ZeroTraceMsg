@@ -354,8 +354,7 @@ int main()
         std::string s_tok = extract_token(
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob =
-            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string blob_hex = Botan::hex_encode(blob);
         for (int i = 0; i < RATE_LIMIT_MSGS; ++i) {
             std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " +
@@ -374,8 +373,7 @@ int main()
         std::string s_tok = extract_token(
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob =
-            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string blob_hex = Botan::hex_encode(blob);
         for (int i = 0; i < RATE_LIMIT_MSGS; ++i)
             cmd(fd,
@@ -447,9 +445,8 @@ int main()
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
                                                       Botan::hex_encode(recipient.pubkey_bytes)));
-        auto blob =
-            encrypt_message("end to end", sender.user_id, "alice", recipient.pubkey_bytes, rng,
-                            g_cfg);
+        auto blob = encrypt_message("end to end", sender.user_id, "alice", recipient.pubkey_bytes,
+                                    rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
 
@@ -476,8 +473,7 @@ int main()
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
                                                       Botan::hex_encode(recipient.pubkey_bytes)));
-        auto blob =
-            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
         poll_all(fd, recipient.user_id, r_tok); // recipient collects — triggers ack
@@ -496,8 +492,7 @@ int main()
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
                                                       Botan::hex_encode(recipient.pubkey_bytes)));
-        auto blob =
-            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         std::string blob_hex = Botan::hex_encode(blob);
         for (int i = 0; i < 3; ++i)
             cmd(fd,
@@ -518,8 +513,7 @@ int main()
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
                                                       Botan::hex_encode(recipient.pubkey_bytes)));
-        auto blob =
-            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
         poll_all(fd, recipient.user_id, r_tok);
@@ -538,8 +532,7 @@ int main()
         std::string s_tok = extract_token(
             cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         cmd(fd, "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
-        auto blob =
-            encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
         // recipient has not polled — no ACK yet
@@ -571,8 +564,8 @@ int main()
         auto recipient = generate_identity(rng, g_cfg);
         auto conn = tls_connect(TEST_TLS_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        std::string s_tok = extract_token(tls_cmd(conn, "REGISTER " + sender.user_id + " " +
-                                                             Botan::hex_encode(sender.pubkey_bytes)));
+        std::string s_tok = extract_token(tls_cmd(
+            conn, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
         std::string r_tok =
             extract_token(tls_cmd(conn, "REGISTER " + recipient.user_id + " " +
                                             Botan::hex_encode(recipient.pubkey_bytes)));
