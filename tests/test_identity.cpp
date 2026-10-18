@@ -156,6 +156,82 @@ int main()
     }
 
     // -------------------------------------------------------
+    // Argon2id — parameter variants
+    // Each row tests a distinct (m, t, p) combination to
+    // exercise different memory and parallelism paths.
+    // -------------------------------------------------------
+    struct ArgonParams {
+        int m, t, p;
+    };
+    for (auto [m, t, p] : std::vector<ArgonParams>{
+             {8, 1, 1},     // minimum valid — tests lower bound, fast
+             {16384, 2, 1}, // 16 MB, 2 passes
+             {32768, 2, 2}, // 32 MB, 2 passes, 2 threads
+             {65536, 3, 4}, // 64 MB, 3 passes, 4 threads
+         }) {
+        std::string label = "Argon2id (m=" + std::to_string(m) + ", t=" + std::to_string(t) +
+                            ", p=" + std::to_string(p) + "): save/load round-trip";
+        TEST(label);
+        {
+            Config c;
+            c.passphrase_kdf = "Argon2id";
+            c.passphrase_kdf_memory_kb = m;
+            c.passphrase_kdf_cost = t;
+            c.passphrase_kdf_parallelism = p;
+
+            auto id = generate_identity(rng, c);
+            save_identity(id, make_secure("pass"), tmp_file, rng, c);
+            auto loaded = load_identity(make_secure("pass"), tmp_file, c);
+            ASSERT_EQ(id.user_id, loaded.user_id);
+            ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
+        }
+    }
+
+    // -------------------------------------------------------
+    // PBKDF2 — iteration counts
+    // -------------------------------------------------------
+    for (int iters : {10000, 100000, 200000, 600000}) {
+        std::string label =
+            "PBKDF2 (" + std::to_string(iters) + " iterations): save/load round-trip";
+        TEST(label);
+        {
+            Config c;
+            c.passphrase_kdf = "PBKDF2";
+            c.passphrase_kdf_cost = iters;
+
+            auto id = generate_identity(rng, c);
+            save_identity(id, make_secure("pass"), tmp_file, rng, c);
+            auto loaded = load_identity(make_secure("pass"), tmp_file, c);
+            ASSERT_EQ(id.user_id, loaded.user_id);
+            ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
+        }
+    }
+
+    // -------------------------------------------------------
+    // KEM variants — save/load with every supported algorithm
+    // Uses minimal Argon2id (m=8, t=1, p=1) so key-format
+    // correctness is tested without KDF cost dominating time.
+    // -------------------------------------------------------
+    for (const auto& kem : {"ECDH-P256", "ECDH-P384", "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024",
+                            "HYBRID-P256-ML-KEM-768", "HYBRID-P384-ML-KEM-1024"}) {
+        TEST(std::string("save/load round-trip: ") + kem);
+        {
+            Config c;
+            c.kem = kem;
+            c.passphrase_kdf = "Argon2id";
+            c.passphrase_kdf_memory_kb = 8;
+            c.passphrase_kdf_cost = 1;
+            c.passphrase_kdf_parallelism = 1;
+
+            auto id = generate_identity(rng, c);
+            save_identity(id, make_secure("pass"), tmp_file, rng, c);
+            auto loaded = load_identity(make_secure("pass"), tmp_file, c);
+            ASSERT_EQ(id.user_id, loaded.user_id);
+            ASSERT_EQ(id.pubkey_bytes, loaded.pubkey_bytes);
+        }
+    }
+
+    // -------------------------------------------------------
     // SecureString / make_secure
     // -------------------------------------------------------
     TEST("make_secure from string literal holds correct bytes");
