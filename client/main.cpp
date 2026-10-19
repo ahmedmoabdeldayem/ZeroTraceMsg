@@ -597,6 +597,18 @@ int main(int argc, char* argv[])
     if (username.size() > 4 && username.substr(username.size() - 4) == ".enc")
         username = username.substr(0, username.size() - 4);
 
+    // Reject usernames that could escape the users/ directory via path traversal
+    for (char c : username) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+            std::cerr << "Username may only contain letters, digits, hyphens, and underscores.\n";
+            return 1;
+        }
+    }
+    if (username.empty()) {
+        std::cerr << "Username must not be empty.\n";
+        return 1;
+    }
+
     username_local = username;
 
     // store identity in users/<username>.enc
