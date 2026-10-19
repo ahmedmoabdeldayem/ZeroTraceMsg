@@ -252,5 +252,33 @@ int main()
     }
 
     std::remove(tmp_file.c_str());
+
+    // -------------------------------------------------------
+    // derive_contacts_key
+    // -------------------------------------------------------
+    TEST("derive_contacts_key returns 32 bytes");
+    {
+        auto id = generate_identity(rng, cfg);
+        auto key = derive_contacts_key(id, cfg);
+        ASSERT_EQ(key.size(), (size_t)32);
+    }
+
+    TEST("derive_contacts_key is deterministic for the same identity");
+    {
+        auto id = generate_identity(rng, cfg);
+        auto k1 = derive_contacts_key(id, cfg);
+        auto k2 = derive_contacts_key(id, cfg);
+        ASSERT_EQ(k1, k2);
+    }
+
+    TEST("derive_contacts_key differs for different identities");
+    {
+        auto id1 = generate_identity(rng, cfg);
+        auto id2 = generate_identity(rng, cfg);
+        auto k1 = derive_contacts_key(id1, cfg);
+        auto k2 = derive_contacts_key(id2, cfg);
+        ASSERT_TRUE(k1 != k2);
+    }
+
     SUITE_RESULTS();
 }

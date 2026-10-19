@@ -4,6 +4,7 @@
 #include <botan/aead.h>
 #include <botan/hash.h>
 #include <botan/hex.h>
+#include <botan/kdf.h>
 #include <botan/pkcs8.h>
 #include <botan/pwdhash.h>
 #include <fstream>
@@ -144,4 +145,23 @@ Identity load_identity(const SecureString& passphrase, const std::string& path, 
     }
     id.user_id = derive_user_id(id.pubkey_bytes);
     return id;
+}
+
+// ── contacts key derivation ───────────────────────────────────────────────────
+
+Botan::secure_vector<uint8_t> derive_contacts_key(const Identity& id, const Config& cfg)
+{
+    auto hkdf_ext = Botan::KDF::create_or_throw("HKDF-Extract(" + cfg.botan_hash() + ")");
+    auto hkdf_exp = Botan::KDF::create_or_throw("HKDF-Expand(" + cfg.botan_hash() + ")");
+
+    auto raw = id.priv_key->raw_private_key_bits();
+
+    // Extract: IKM = private key seed, no salt (deterministic per identity)
+    Botan::secure_vector<uint8_t> prk =
+        hkdf_ext->derive_key(32, raw, std::vector<uint8_t>{}, std::vector<uint8_t>{});
+
+    // Expand: domain-separate with a fixed info string
+    static const std::vector<uint8_t> info{'Z', 'T', 'M', '-', 'c', 'o', 'n', 't',
+                                           'a', 'c', 't', 's', '-', 'v', '1'};
+    return hkdf_exp->derive_key(32, prk, std::vector<uint8_t>{}, info);
 }

@@ -56,6 +56,8 @@ void Config::validate() const
         throw std::invalid_argument("server.port must be 1–65535");
     if (max_users < 0)
         throw std::invalid_argument("server.max_users must be >= 0");
+    if (max_connections < 0)
+        throw std::invalid_argument("server.max_connections must be >= 0");
     if (max_inbox_messages < 1)
         throw std::invalid_argument("server.max_inbox_messages must be >= 1");
     if (session_ttl_hours < 0)
@@ -193,6 +195,8 @@ Config Config::load(const std::string& path)
                     cfg.server_bind = val;
                 else if (key == "max_users")
                     cfg.max_users = parse_int(val, key);
+                else if (key == "max_connections")
+                    cfg.max_connections = parse_int(val, key);
                 else if (key == "max_inbox_messages")
                     cfg.max_inbox_messages = parse_int(val, key);
                 else if (key == "session_ttl_hours")

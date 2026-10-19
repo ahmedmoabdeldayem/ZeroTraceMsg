@@ -17,5 +17,5 @@ int main(int argc, char* argv[])
         std::cerr << "Using default configuration.\n";
     }
 
-    start_server_tls(cfg);
+    start_server_tls(cfg, config_path);
 }

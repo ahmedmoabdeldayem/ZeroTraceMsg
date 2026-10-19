@@ -32,3 +32,7 @@ void save_identity(const Identity& id, const SecureString& passphrase, const std
 
 // Load identity from file. Throws on wrong passphrase or corrupt file.
 Identity load_identity(const SecureString& passphrase, const std::string& path, const Config& cfg);
+
+// Derive a 32-byte AES key for encrypting the contacts file, deterministically from the
+// private key seed via HKDF. No passphrase needed — tied to the identity itself.
+Botan::secure_vector<uint8_t> derive_contacts_key(const Identity& id, const Config& cfg);

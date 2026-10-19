@@ -10,8 +10,11 @@
 #include "../common/tls_utils.hpp"
 #include <arpa/inet.h>
 #include <atomic>
+#include <botan/aead.h>
 #include <botan/auto_rng.h>
 #include <botan/hex.h>
+#include <botan/secmem.h>
+#include <botan/x509cert.h>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -28,19 +31,52 @@
 #include <vector>
 
 // -------------------------------------------------------
-// TLS client — accepts any server certificate (self-signed).
-// A production deployment should pin the server's cert fingerprint here.
+// TLS client with TOFU cert pinning.
+// On first connect: saves the server cert fingerprint to pin_file.
+// On subsequent connects: rejects any cert that doesn't match the saved fingerprint.
+// To re-pin (e.g. after a legitimate cert rotation): delete the pin file.
 // -------------------------------------------------------
 class ClientCallbacks : public SocketTlsCallbacks
 {
-  public:
-    explicit ClientCallbacks(int fd) : SocketTlsCallbacks(fd) {}
+    std::string pin_file_;
 
-    void tls_verify_cert_chain(const std::vector<Botan::X509_Certificate>&,
+  public:
+    explicit ClientCallbacks(int fd, std::string pin_file)
+        : SocketTlsCallbacks(fd), pin_file_(std::move(pin_file))
+    {
+    }
+
+    void tls_verify_cert_chain(const std::vector<Botan::X509_Certificate>& chain,
                                const std::vector<std::optional<Botan::OCSP::Response>>&,
                                const std::vector<Botan::Certificate_Store*>&, Botan::Usage_Type,
                                std::string_view, const Botan::TLS::Policy&) override
-    { /* accept any cert — see Known Limitations */
+    {
+        if (chain.empty())
+            throw std::runtime_error("Server sent no certificate");
+
+        std::string fp = chain[0].fingerprint("SHA-256");
+
+        std::ifstream pf(pin_file_);
+        if (pf.good()) {
+            std::string saved;
+            std::getline(pf, saved);
+            if (fp != saved)
+                throw std::runtime_error("Server certificate mismatch!\n"
+                                         "  Pinned:  " +
+                                         saved +
+                                         "\n"
+                                         "  Current: " +
+                                         fp +
+                                         "\n"
+                                         "  Delete " +
+                                         pin_file_ + " to trust the new certificate.");
+        } else {
+            std::ofstream of(pin_file_);
+            if (!of)
+                throw std::runtime_error("Cannot write pin file: " + pin_file_);
+            of << fp << "\n";
+            std::cout << "[TOFU] Pinned server certificate: " << fp.substr(0, 23) << "...\n";
+        }
     }
 };
 
@@ -77,29 +113,73 @@ static std::mutex socket_mutex;                         // serializes all socket
 static std::map<std::string, std::string> contacts;     // id → nickname
 static std::map<std::string, std::string> contacts_rev; // nickname → id
 static std::string contacts_file;
+static Botan::secure_vector<uint8_t>
+    g_contacts_key;            // derived from identity, used to encrypt contacts
+static std::string g_pin_file; // TOFU cert pin file path
 static ReplayGuard replay_guard;
 
 // -------------------------------------------------------
 // Contacts — persisted to users/<username>.contacts
-// Format: one entry per line: <id> <nickname>
+// Format: nonce(12) || AES-256-GCM( "id nickname\n"... )
+// Key is derived from the identity private key via HKDF (no extra passphrase needed).
+//
+// The path parameter must be caller-sanitised (username validated in main()).
+// Passing it explicitly keeps the sanitised value's data-flow path visible
+// to static analysers and avoids taint through the global.
 // -------------------------------------------------------
-static void load_contacts()
+static void load_contacts(const std::string& path)
 {
-    std::ifstream f(contacts_file);
+    if (g_contacts_key.empty())
+        return;
+    std::ifstream f(path, std::ios::binary);
     if (!f)
         return;
-    std::string id, nick;
-    while (f >> id >> nick) {
-        contacts[id] = nick;
-        contacts_rev[nick] = id;
+
+    std::vector<uint8_t> nonce(12);
+    f.read(reinterpret_cast<char*>(nonce.data()), 12);
+    if (f.gcount() < 12)
+        return; // empty or truncated — start fresh
+
+    std::string raw(std::istreambuf_iterator<char>(f), {});
+    if (raw.empty())
+        return;
+    try {
+        Botan::secure_vector<uint8_t> ct(raw.begin(), raw.end());
+        auto dec = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Decryption);
+        dec->set_key(g_contacts_key);
+        dec->start(nonce);
+        dec->finish(ct);
+
+        std::istringstream ss(std::string(ct.begin(), ct.end()));
+        std::string id, nick;
+        while (ss >> id >> nick) {
+            contacts[id] = nick;
+            contacts_rev[nick] = id;
+        }
+    } catch (...) {
+        // Corrupt or tampered — start with empty contacts
     }
 }
 
-static void save_contacts()
+static void save_contacts(const std::string& path)
 {
-    std::ofstream f(contacts_file);
+    if (g_contacts_key.empty())
+        return;
+
+    std::string plaintext;
     for (const auto& [id, nick] : contacts)
-        f << id << " " << nick << "\n";
+        plaintext += id + " " + nick + "\n";
+
+    auto nonce = rng.random_vec(12);
+    auto enc = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
+    enc->set_key(g_contacts_key);
+    enc->start(nonce);
+    Botan::secure_vector<uint8_t> buf(plaintext.begin(), plaintext.end());
+    enc->finish(buf);
+
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(nonce.data()), nonce.size());
+    f.write(reinterpret_cast<const char*>(buf.data()), buf.size());
 }
 
 static void add_contact(const std::string& id, const std::string& nick)
@@ -109,7 +189,7 @@ static void add_contact(const std::string& id, const std::string& nick)
         contacts_rev.erase(contacts[id]);
     contacts[id] = nick;
     contacts_rev[nick] = id;
-    save_contacts();
+    save_contacts(contacts_file);
 }
 
 // resolve nickname or raw ID → user ID
@@ -169,7 +249,7 @@ static int connect_to_server(const std::string& ip)
 
     // Establish TLS over the connected socket
     auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
-    g_tls_cb = std::make_shared<ClientCallbacks>(fd);
+    g_tls_cb = std::make_shared<ClientCallbacks>(fd, g_pin_file);
     auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
     auto creds = std::make_shared<ClientCredentials>();
     auto policy = std::make_shared<ClientTlsPolicy>(g_cfg.tls_min_version == "1.2");
@@ -202,6 +282,21 @@ static int64_t now_unix()
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+// -------------------------------------------------------
+// Protocol version handshake
+// -------------------------------------------------------
+static bool do_hello(int fd)
+{
+    std::lock_guard<std::mutex> lock(socket_mutex);
+    send_line(fd, "HELLO ZTM/" + std::to_string(PROTOCOL_VERSION));
+    std::string resp = read_line(fd);
+    if (resp.substr(0, 3) == "ERR") {
+        std::cerr << "[error] Server rejected version handshake: " << resp << "\n";
+        return false;
+    }
+    return true;
 }
 
 // -------------------------------------------------------
@@ -506,12 +601,25 @@ int main(int argc, char* argv[])
     if (username.size() > 4 && username.substr(username.size() - 4) == ".enc")
         username = username.substr(0, username.size() - 4);
 
+    // Reject usernames that could escape the users/ directory via path traversal
+    for (char c : username) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+            std::cerr << "Username may only contain letters, digits, hyphens, and underscores.\n";
+            return 1;
+        }
+    }
+    if (username.empty()) {
+        std::cerr << "Username must not be empty.\n";
+        return 1;
+    }
+
     username_local = username;
 
     // store identity in users/<username>.enc
-    // store contacts in users/<username>.contacts
+    // store contacts in users/<username>.contacts (AES-256-GCM encrypted)
     std::string identity_file = "users/" + username + ".enc";
     contacts_file = "users/" + username + ".contacts";
+    g_pin_file = "users/.server_pin";
 
     // create users/ with restricted permissions — contains encrypted private keys
     mkdir("users", 0700); // silently succeeds if already exists
@@ -539,6 +647,9 @@ int main(int argc, char* argv[])
         std::cout << "Identity saved to " << identity_file << "\n";
     }
 
+    // Derive contacts encryption key from the private key (deterministic, no extra passphrase)
+    g_contacts_key = derive_contacts_key(identity, g_cfg);
+
     // -------------------------------------------------------
     // Connect and register
     // -------------------------------------------------------
@@ -549,12 +660,17 @@ int main(int argc, char* argv[])
     }
     sock_fd.store(fd);
 
+    if (!do_hello(fd)) {
+        std::cerr << "Version handshake failed.\n";
+        return 1;
+    }
+
     if (!do_register(fd)) {
         std::cerr << "Registration failed.\n";
         return 1;
     }
 
-    load_contacts();
+    load_contacts(contacts_file);
 
     // start background threads
     std::thread(poll_thread, server_ip).detach();
@@ -580,6 +696,16 @@ int main(int argc, char* argv[])
 
         if (first == "quit") {
             break;
+        } else if (first == "deregister") {
+            std::lock_guard<std::mutex> lock(socket_mutex);
+            send_line(fd, "DEREGISTER " + identity.user_id + " " + session_token);
+            std::string resp = read_line(fd);
+            if (resp == "OK") {
+                std::cout << "\n[Account removed from server. Goodbye.]\n";
+                break;
+            } else {
+                std::cout << "\n[Deregister failed: " << resp << "]\n";
+            }
         } else if (first == "add") {
             // add <id> <nickname>
             std::string id, nick;

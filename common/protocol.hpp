@@ -29,3 +29,6 @@ static constexpr size_t MAX_BLOB_LEN =
 // Rate limiting
 static constexpr int RATE_LIMIT_MSGS = 20;     // max messages per user per window
 static constexpr int RATE_LIMIT_WINDOW_S = 60; // window duration in seconds
+
+// Wire protocol version — client sends HELLO ZTM/<n>, server echoes or rejects
+static constexpr int PROTOCOL_VERSION = 1;
