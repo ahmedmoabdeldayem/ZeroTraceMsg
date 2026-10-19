@@ -213,6 +213,8 @@ Config Config::load(const std::string& path)
                     cfg.cert_path = val;
                 else if (key == "key_path")
                     cfg.key_path = val;
+                else if (key == "db_path")
+                    cfg.db_path = val;
                 else
                     bad("unknown key in [server]: " + key);
 

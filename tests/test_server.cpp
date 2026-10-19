@@ -234,6 +234,10 @@ int main()
     SUITE_INIT("test_server");
     std::cout << "=== server tests ===\n\n";
 
+    // Initialise in-memory store before any server threads start so all
+    // servers share one in-memory DB and none try to open "zerotrace.db".
+    reset_server_state();
+
     std::thread([] { start_server(TEST_PORT); }).detach();
     std::thread([] {
         Config tls_cfg;

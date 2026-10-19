@@ -1,0 +1,80 @@
+#pragma once
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+struct sqlite3; // avoid pulling in sqlite3.h in every translation unit
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Store — persistent server state backed by SQLite.
+//
+// All methods assume the caller holds store_mutex (defined in server.cpp).
+// Pass path="" for an in-memory database (used by tests via reset_server_state).
+// ─────────────────────────────────────────────────────────────────────────────
+class Store
+{
+  public:
+    explicit Store(const std::string& path);
+    ~Store();
+
+    Store(const Store&) = delete;
+    Store& operator=(const Store&) = delete;
+
+    // ── users ─────────────────────────────────────────────────────────────────
+    void put_user(const std::string& user_id, const std::vector<uint8_t>& pubkey);
+    std::optional<std::vector<uint8_t>> get_pubkey(const std::string& user_id);
+    bool user_exists(const std::string& user_id);
+    int user_count();
+    void remove_user(const std::string& user_id);
+
+    // ── sessions ──────────────────────────────────────────────────────────────
+    struct SessionRow {
+        std::string token;
+        int64_t created_at;
+    };
+    void put_session(const std::string& user_id, const std::string& token, int64_t created_at);
+    std::optional<SessionRow> get_session(const std::string& user_id);
+    void remove_session(const std::string& user_id);
+    int session_count();
+    void prune_sessions(int64_t min_created_at);
+
+    // ── messages ──────────────────────────────────────────────────────────────
+    struct MessageRow {
+        std::string id;
+        std::string sender_id;
+        std::vector<uint8_t> blob;
+    };
+    void enqueue(const std::string& msg_id, const std::string& recipient_id,
+                 const std::string& sender_id, const std::vector<uint8_t>& blob, int64_t ts);
+    int inbox_size(const std::string& recipient_id);
+    // Returns all messages for recipient and deletes them atomically.
+    std::vector<MessageRow> drain_inbox(const std::string& recipient_id);
+    int total_messages();
+    void prune_messages(int64_t min_ts);
+
+    // ── rate buckets ──────────────────────────────────────────────────────────
+    struct RateRow {
+        int count;
+        int64_t window_start;
+        int64_t last_used;
+    };
+    std::optional<RateRow> get_rate_bucket(const std::string& user_id);
+    void put_rate_bucket(const std::string& user_id, int count, int64_t window_start,
+                         int64_t last_used);
+    void remove_rate_bucket(const std::string& user_id);
+    void prune_rate_buckets(int64_t min_last_used);
+
+    // ── delivery acks ─────────────────────────────────────────────────────────
+    void increment_ack(const std::string& user_id, int n = 1);
+    // Returns current pending ACK count and resets it to zero.
+    int drain_ack(const std::string& user_id);
+
+    // ── bulk ──────────────────────────────────────────────────────────────────
+    void clear_all();
+
+  private:
+    sqlite3* db_{nullptr};
+    void exec(const char* sql);
+    void check(int rc) const;
+};
