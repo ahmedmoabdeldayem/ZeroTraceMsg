@@ -41,6 +41,10 @@ key_path  = /var/lib/zerotrace/certs/server.key.pem
 ; SQLite database — persisted via the volume.
 db_path = /var/lib/zerotrace/zerotrace.db
 
+; Admin port — binds to 127.0.0.1 only inside the container.
+; Expose to the host only if needed: docker run -p 127.0.0.1:9998:9998 ...
+admin_port = 9998
+
 
 ; ============================================================
 [client]

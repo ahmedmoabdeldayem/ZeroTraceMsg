@@ -522,7 +522,38 @@ visible outside the TLS layer. Each TCP connection is independent.
 
 ---
 
-## 11. Configurable Protocol Parameters
+## 11. Admin Protocol
+
+The server exposes a separate **admin port** (default 9998) that binds to `127.0.0.1` only.
+It uses the same line-based framing as the main protocol but requires no TLS and no auth —
+access control is delegated to the OS (only local processes can connect).
+
+Use `msg_admin` to interact with it:
+
+```
+msg_admin [--port PORT] stats
+msg_admin [--port PORT] list-users
+msg_admin [--port PORT] kick <user_id>
+msg_admin [--port PORT] reload
+```
+
+Set `admin_port = 0` in `zerotrace.conf` to disable the admin interface entirely.
+
+### Admin commands
+
+| Command | Request | Response |
+|---|---|---|
+| `STATS` | `STATS` | `OK users=N sessions=N messages=N connections=N uptime=N` |
+| `LIST_USERS` | `LIST_USERS` | `USER <id>` lines, then `END` |
+| `KICK <user_id>` | `KICK <user_id>` | `OK` or `ERR unknown user` |
+| `RELOAD` | `RELOAD` | `OK` (triggers SIGHUP-equivalent hot-reload) |
+
+`KICK` performs a full user removal: public key, session, inbox, and rate-limit state are
+all deleted. It is equivalent to an admin-initiated DEREGISTER.
+
+---
+
+## 12. Configurable Protocol Parameters
 
 The following parameters are marked `[protocol]` in `zerotrace.conf` and **must be
 identical** across all clients and the server in a deployment. Mismatches cause decryption

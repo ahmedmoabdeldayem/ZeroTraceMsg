@@ -30,6 +30,9 @@ static const int TEST_RESTRICTED_PORT = 59994;
 static const int TEST_LOG_FILE_PORT = 59993;
 // TLS server with a fresh cert path (covers ensure_server_cert generation path)
 static const int TEST_CERT_GEN_PORT = 59992;
+// TLS server with admin port enabled
+static const int TEST_ADMIN_TLS_PORT = 59991;
+static const int TEST_ADMIN_PORT = 59990;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -303,6 +306,15 @@ int main()
         cfg.cert_algorithm = "Ed25519";
         cfg.cert_path = "/tmp/ztm_test_ed25519.cert.pem";
         cfg.key_path = "/tmp/ztm_test_ed25519.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // TLS server with admin port enabled (covers admin command paths)
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_ADMIN_TLS_PORT;
+        cfg.admin_port = TEST_ADMIN_PORT;
+        cfg.cert_path = "/tmp/ztm_admin.cert.pem";
+        cfg.key_path = "/tmp/ztm_admin.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -957,6 +969,122 @@ int main()
         reset_server_state();
         int fd = connect_test();
         std::string resp = cmd(fd, "INVALID");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Admin port
+    // -------------------------------------------------------
+
+    // Helper: connect to the admin port (plain TCP, 127.0.0.1 only)
+    auto connect_admin = []() -> int {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(TEST_ADMIN_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
+    };
+
+    TEST("admin STATS returns OK with metrics");
+    {
+        reset_server_state();
+        int fd = connect_admin();
+        ASSERT_TRUE(fd >= 0);
+        std::string resp = cmd(fd, "STATS");
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        ASSERT_TRUE(resp.find("users=") != std::string::npos);
+        ASSERT_TRUE(resp.find("uptime=") != std::string::npos);
+        ASSERT_TRUE(resp.find("connections=") != std::string::npos);
+        close(fd);
+    }
+
+    TEST("admin LIST_USERS returns registered users and END");
+    {
+        reset_server_state();
+        // Register a user on the admin TLS server
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_ADMIN_TLS_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        close(conn.fd);
+
+        int fd = connect_admin();
+        ASSERT_TRUE(fd >= 0);
+        send_line(fd, "LIST_USERS");
+        // Read until END
+        bool found_user = false;
+        bool found_end = false;
+        for (int i = 0; i < 20; ++i) {
+            std::string line = read_line(fd);
+            if (line.substr(0, 5) == "USER ")
+                found_user = true;
+            if (line == "END") {
+                found_end = true;
+                break;
+            }
+            if (line.empty())
+                break;
+        }
+        ASSERT_TRUE(found_user);
+        ASSERT_TRUE(found_end);
+        close(fd);
+    }
+
+    TEST("admin KICK removes user and returns OK");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_ADMIN_TLS_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        close(conn.fd);
+
+        int fd = connect_admin();
+        ASSERT_TRUE(fd >= 0);
+        std::string resp = cmd(fd, "KICK " + id.user_id);
+        ASSERT_EQ(resp, std::string("OK"));
+        close(fd);
+
+        // User should be gone — GETKEY returns ERR
+        auto conn2 = tls_connect(TEST_ADMIN_TLS_PORT);
+        ASSERT_TRUE(conn2.fd >= 0);
+        std::string kresp = tls_cmd(conn2, "GETKEY " + id.user_id);
+        ASSERT_TRUE(kresp.substr(0, 3) == "ERR");
+        close(conn2.fd);
+    }
+
+    TEST("admin KICK returns ERR for unknown user");
+    {
+        reset_server_state();
+        int fd = connect_admin();
+        ASSERT_TRUE(fd >= 0);
+        std::string resp = cmd(fd, "KICK 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("admin RELOAD returns OK");
+    {
+        reset_server_state();
+        int fd = connect_admin();
+        ASSERT_TRUE(fd >= 0);
+        std::string resp = cmd(fd, "RELOAD");
+        ASSERT_EQ(resp, std::string("OK"));
+        close(fd);
+    }
+
+    TEST("admin unknown command returns ERR");
+    {
+        reset_server_state();
+        int fd = connect_admin();
+        ASSERT_TRUE(fd >= 0);
+        std::string resp = cmd(fd, "INVALID_ADMIN_CMD");
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
