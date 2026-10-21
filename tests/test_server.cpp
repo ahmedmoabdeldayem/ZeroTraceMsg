@@ -192,12 +192,13 @@ static std::string cmd(int fd, const std::string& line)
     return read_line(fd);
 }
 
-// Read all MSG lines from a POLL response, return the blobs; stops at NOMSG.
+// Read all MSG lines from a POLL response, send MSGACK, return the blobs.
 static std::vector<std::vector<uint8_t>> poll_all(int fd, const std::string& user_id,
                                                   const std::string& token)
 {
     send_line(fd, "POLL " + user_id + " " + token);
     std::vector<std::vector<uint8_t>> blobs;
+    std::vector<std::string> ids;
     while (true) {
         std::string line = read_line(fd);
         if (line == "NOMSG" || line.empty())
@@ -206,8 +207,19 @@ static std::vector<std::vector<uint8_t>> poll_all(int fd, const std::string& use
             std::istringstream ss(line.substr(4));
             std::string msg_id, blob_hex;
             ss >> msg_id >> blob_hex;
+            ids.push_back(msg_id);
             blobs.push_back(Botan::hex_decode(blob_hex));
         }
+    }
+    if (!ids.empty()) {
+        std::string id_list;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i > 0)
+                id_list += ',';
+            id_list += ids[i];
+        }
+        send_line(fd, "MSGACK " + user_id + " " + token + " " + id_list);
+        read_line(fd); // consume OK
     }
     return blobs;
 }
@@ -518,7 +530,7 @@ int main()
         close(fd);
     }
 
-    TEST("POLL delivers message and wipes inbox on receipt");
+    TEST("POLL then MSGACK removes message; second poll returns empty");
     {
         reset_server_state();
         auto sender = generate_identity(rng, g_cfg);
@@ -533,13 +545,77 @@ int main()
         cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
                     Botan::hex_encode(blob));
 
-        // First poll — should deliver the message
+        // poll_all sends MSGACK — message is deleted after this call.
         auto blobs = poll_all(fd, recipient.user_id, r_tok);
         ASSERT_EQ(blobs.size(), (size_t)1);
 
-        // Second poll — inbox must be empty after delivery
+        // Second poll — inbox is empty after MSGACK.
         auto blobs2 = poll_all(fd, recipient.user_id, r_tok);
         ASSERT_EQ(blobs2.size(), (size_t)0);
+        close(fd);
+    }
+
+    TEST("POLL without MSGACK keeps message in-flight; not re-sent on next poll");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+
+        // First poll without MSGACK — message goes in-flight.
+        send_line(fd, "POLL " + recipient.user_id + " " + r_tok);
+        std::vector<std::string> lines1;
+        while (true) {
+            std::string l = read_line(fd);
+            if (l == "NOMSG" || l.empty())
+                break;
+            lines1.push_back(l);
+        }
+        ASSERT_EQ(lines1.size(), (size_t)1); // one MSG line
+
+        // Second poll (no MSGACK sent) — message still in-flight, not re-sent.
+        send_line(fd, "POLL " + recipient.user_id + " " + r_tok);
+        std::vector<std::string> lines2;
+        while (true) {
+            std::string l = read_line(fd);
+            if (l == "NOMSG" || l.empty())
+                break;
+            lines2.push_back(l);
+        }
+        ASSERT_EQ(lines2.size(), (size_t)0);
+        close(fd);
+    }
+
+    TEST("MSGACK with invalid token is rejected");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = cmd(fd, "MSGACK " + id.user_id + " " + std::string(64, '0') +
+                                       " deadbeefdeadbeefdeadbeefdeadbeef");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("MSGACK with valid token and unknown IDs returns OK (idempotent)");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string token = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // ACKing a non-existent ID is a no-op, not an error.
+        std::string resp =
+            cmd(fd, "MSGACK " + id.user_id + " " + token + " deadbeefdeadbeefdeadbeefdeadbeef");
+        ASSERT_EQ(resp, std::string("OK"));
         close(fd);
     }
 
@@ -685,7 +761,11 @@ int main()
         tls_send_line(*conn.tls, "POLL " + recipient.user_id + " " + r_tok);
         std::string msg_line = tls_read_line(conn.fd, *conn.tls, *conn.cb);
         ASSERT_TRUE(msg_line.substr(0, 4) == "MSG ");
+        std::istringstream mss(msg_line.substr(4));
+        std::string mid;
+        mss >> mid;
         tls_read_line(conn.fd, *conn.tls, *conn.cb); // consume NOMSG
+        tls_cmd(conn, "MSGACK " + recipient.user_id + " " + r_tok + " " + mid);
         close(conn.fd);
     }
 
@@ -843,20 +923,29 @@ int main()
 
         // parse MSG line to extract ID
         send_line(fd, "POLL " + recipient.user_id + " " + r_tok);
-        std::string msg_line = read_line(fd);
-        while (msg_line == "NOMSG" || msg_line.substr(0, 4) == "ACK ")
+        std::string msg_line;
+        while (true) {
             msg_line = read_line(fd);
+            if (msg_line == "NOMSG" || msg_line.empty())
+                break;
+            if (msg_line.substr(0, 4) == "MSG ")
+                break;
+        }
         ASSERT_TRUE(msg_line.substr(0, 4) == "MSG ");
         std::istringstream ss(msg_line.substr(4));
         std::string msg_id;
         ss >> msg_id;
         ASSERT_EQ(msg_id.size(), (size_t)32);
-        // Must be all hex chars
         bool all_hex = true;
         for (char c : msg_id)
             if (!std::isxdigit(c))
                 all_hex = false;
         ASSERT_TRUE(all_hex);
+        // Drain NOMSG then send MSGACK
+        while (msg_line != "NOMSG" && !msg_line.empty())
+            msg_line = read_line(fd);
+        send_line(fd, "MSGACK " + recipient.user_id + " " + r_tok + " " + msg_id);
+        read_line(fd); // consume OK
         close(fd);
     }
 

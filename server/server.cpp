@@ -337,20 +337,67 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 continue;
             }
 
-            auto msgs = s.drain_inbox(user_id);
+            // Phase 1: mark pending messages in-flight and return them.
+            // The client must follow up with MSGACK to delete them. Until then
+            // the messages are retained so a crashed client gets re-delivery.
+            auto msgs = s.peek_inbox(user_id, now_unix());
             if (!msgs.empty()) {
-                for (auto& msg : msgs) {
+                for (auto& msg : msgs)
                     sl("MSG " + msg.id + " " + Botan::hex_encode(msg.blob));
-                    s.increment_ack(msg.sender_id);
-                }
-                LOG_INFO("[POLL]     user=" + user_id + " -> delivered " +
-                         std::to_string(msgs.size()) + " message(s), wiped from store");
+                LOG_INFO("[POLL]     user=" + user_id + " -> sent " + std::to_string(msgs.size()) +
+                         " message(s) (awaiting MSGACK)");
             }
 
             int ack = s.drain_ack(user_id);
             if (ack > 0)
                 sl("ACK " + std::to_string(ack));
             sl("NOMSG");
+
+        } else if (cmd == "MSGACK") {
+            // Phase 2: client confirms it saved the messages; delete them and credit delivery acks.
+            std::string user_id, token, ids_str;
+            ss >> user_id >> token >> ids_str;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+
+            if (token_ok && cfg.session_ttl_hours > 0) {
+                int64_t age_h = (now_unix() - sess->created_at) / 3600;
+                if (age_h >= cfg.session_ttl_hours) {
+                    s.remove_session(user_id);
+                    token_ok = false;
+                }
+            }
+
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+
+            // Parse comma-separated message IDs, fetch sender IDs, delete, credit acks.
+            std::vector<std::string> ids;
+            {
+                std::istringstream id_ss(ids_str);
+                std::string id;
+                while (std::getline(id_ss, id, ','))
+                    if (!id.empty())
+                        ids.push_back(id);
+            }
+
+            // Collect sender IDs before deletion so we can credit delivery acks.
+            std::vector<std::string> sender_ids = s.sender_ids_for(user_id, ids);
+            s.ack_messages(user_id, ids);
+            for (const auto& sid : sender_ids)
+                s.increment_ack(sid);
+
+            sl("OK");
+            LOG_INFO("[MSGACK]   user=" + user_id + " acked " + std::to_string(ids.size()) +
+                     " message(s)");
 
         } else if (cmd == "DEREGISTER") {
             // GDPR right to erasure — removes all server-side data for this user
@@ -399,8 +446,13 @@ static void cleanup_thread(const Config& cfg)
             (cfg.session_ttl_hours > 0) ? now - int64_t(cfg.session_ttl_hours) * 3600 : 0;
         int64_t bucket_cutoff = now - int64_t(cfg.rate_limit_window_s) * 2;
 
+        // Re-queue messages that have been in-flight for too long without an MSGACK.
+        // Threshold: 2 × cleanup_interval so a crashed client always gets re-delivery.
+        int64_t stale_cutoff = now - int64_t(cfg.cleanup_interval_min) * 2 * 60;
+
         std::lock_guard<std::mutex> lock(store_mutex);
         Store& s = get_store();
+        s.requeue_stale(stale_cutoff);
         s.prune_messages(msg_cutoff);
         if (sess_cutoff > 0)
             s.prune_sessions(sess_cutoff);
