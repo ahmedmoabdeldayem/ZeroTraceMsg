@@ -344,8 +344,8 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             if (!msgs.empty()) {
                 for (auto& msg : msgs)
                     sl("MSG " + msg.id + " " + Botan::hex_encode(msg.blob));
-                LOG_INFO("[POLL]     user=" + user_id + " -> sent " +
-                         std::to_string(msgs.size()) + " message(s) (awaiting MSGACK)");
+                LOG_INFO("[POLL]     user=" + user_id + " -> sent " + std::to_string(msgs.size()) +
+                         " message(s) (awaiting MSGACK)");
             }
 
             int ack = s.drain_ack(user_id);

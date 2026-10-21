@@ -269,8 +269,7 @@ std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id
     if (!rows.empty()) {
         Stmt st;
         check(sqlite3_prepare_v2(
-            db_,
-            "UPDATE messages SET in_flight_at=? WHERE recipient_id=? AND in_flight_at IS NULL",
+            db_, "UPDATE messages SET in_flight_at=? WHERE recipient_id=? AND in_flight_at IS NULL",
             -1, &st.s, nullptr));
         check(sqlite3_bind_int64(st.s, 1, now));
         check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
@@ -287,14 +286,13 @@ std::vector<std::string> Store::sender_ids_for(const std::string& recipient_id,
     std::vector<std::string> senders;
     for (const auto& id : ids) {
         Stmt st;
-        check(sqlite3_prepare_v2(
-            db_, "SELECT sender_id FROM messages WHERE id=? AND recipient_id=?", -1, &st.s,
-            nullptr));
+        check(sqlite3_prepare_v2(db_,
+                                 "SELECT sender_id FROM messages WHERE id=? AND recipient_id=?", -1,
+                                 &st.s, nullptr));
         check(sqlite3_bind_text(st.s, 1, id.c_str(), -1, SQLITE_STATIC));
         check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
         if (sqlite3_step(st.s) == SQLITE_ROW)
-            senders.emplace_back(
-                reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
+            senders.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
     }
     return senders;
 }
