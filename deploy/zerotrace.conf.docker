@@ -1,0 +1,89 @@
+; ============================================================
+; ZeroTraceMsg — Docker runtime configuration
+; ============================================================
+; Paths use container-absolute locations.
+; Volume-mount /var/lib/zerotrace for database and cert persistence:
+;
+;   docker run -p 9999:9999 \
+;     -v zerotrace_data:/var/lib/zerotrace \
+;     zerotracemsg
+;
+; Override this file entirely by bind-mounting your own config:
+;
+;   docker run -p 9999:9999 \
+;     -v /host/path/my.conf:/etc/zerotrace/zerotrace.conf:ro \
+;     -v zerotrace_data:/var/lib/zerotrace \
+;     zerotracemsg
+
+
+; ============================================================
+[server]
+; ============================================================
+
+port = 9999
+bind_address = 0.0.0.0
+
+max_users = 0
+max_connections = 1000
+max_inbox_messages = 100
+
+session_ttl_hours = 24
+msg_ttl_hours = 48
+cleanup_interval_min = 10
+
+rate_limit_msgs = 20
+rate_limit_window_s = 60
+
+; Auto-generated on first run and persisted across restarts via the volume.
+cert_path = /var/lib/zerotrace/certs/server.cert.pem
+key_path  = /var/lib/zerotrace/certs/server.key.pem
+
+; SQLite database — persisted via the volume.
+db_path = /var/lib/zerotrace/zerotrace.db
+
+
+; ============================================================
+[client]
+; ============================================================
+
+server = 127.0.0.1
+port = 9999
+poll_interval_s = 3
+msg_ttl_s = 120
+identity_dir = /var/lib/zerotrace/users/
+connection_timeout_s = 10
+reconnect_on_disconnect = true
+
+
+; ============================================================
+[tls]
+; ============================================================
+
+min_version = 1.3
+cert_algorithm = ECDSA-P256
+cert_validity_days = 365
+
+
+; ============================================================
+[crypto]
+; ============================================================
+
+kem = ML-KEM-768
+cipher = AES-256-GCM
+hash = SHA-256
+padded_plaintext_kb = 4
+
+passphrase_kdf = Argon2id
+passphrase_kdf_cost = 3
+passphrase_kdf_memory_kb = 65536
+passphrase_kdf_parallelism = 1
+
+
+; ============================================================
+[logging]
+; ============================================================
+
+level = info
+; Empty = write to stdout (correct for Docker / container orchestrators).
+file =
+format = text

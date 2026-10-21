@@ -1,0 +1,33 @@
+[Unit]
+Description=ZeroTraceMsg — post-quantum encrypted messaging server
+Documentation=https://github.com/ahmedmoabdeldayem/ZeroTraceMsg
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zerotrace
+Group=zerotrace
+WorkingDirectory=/var/lib/zerotrace
+
+ExecStart=/usr/local/bin/msg_server /etc/zerotrace/zerotrace.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5s
+
+# systemd creates /var/lib/zerotrace and /var/log/zerotrace
+# owned by User=zerotrace before the service starts.
+StateDirectory=zerotrace
+LogsDirectory=zerotrace
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
