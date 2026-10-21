@@ -471,15 +471,31 @@ static void poll_thread(std::string server_ip)
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
             send_line(fd, "POLL " + identity.user_id + " " + session_token);
+            std::vector<std::string> msg_ids;
             while (true) {
                 std::string line = read_line(fd);
                 if (line == "NOMSG" || line.empty())
                     break;
                 if (line.substr(0, 4) == "ACK ") {
                     delivered_at.store(now_unix());
-                } else {
+                } else if (line.substr(0, 4) == "MSG ") {
+                    std::istringstream ss(line.substr(4));
+                    std::string msg_id;
+                    ss >> msg_id;
+                    msg_ids.push_back(msg_id);
                     received_lines.push_back(line);
                 }
+            }
+            // Phase 2: confirm receipt so the server deletes the messages.
+            if (!msg_ids.empty()) {
+                std::string id_list;
+                for (size_t i = 0; i < msg_ids.size(); ++i) {
+                    if (i > 0)
+                        id_list += ',';
+                    id_list += msg_ids[i];
+                }
+                send_line(fd, "MSGACK " + identity.user_id + " " + session_token + " " + id_list);
+                read_line(fd); // consume OK
             }
         }
 

@@ -172,6 +172,82 @@ int main()
     }
 
     // -------------------------------------------------------
+    // Two-phase delivery: peek_inbox / ack_messages / requeue_stale
+    // -------------------------------------------------------
+    TEST("peek_inbox returns pending messages and marks them in-flight");
+    {
+        Store s("");
+        s.enqueue("m1", "recip0000000001", "sender000000001", {0xAA}, 100);
+        s.enqueue("m2", "recip0000000001", "sender000000001", {0xBB}, 200);
+        auto msgs = s.peek_inbox("recip0000000001", 1000);
+        ASSERT_EQ(msgs.size(), (size_t)2);
+        ASSERT_EQ(msgs[0].id, "m1");
+        ASSERT_EQ(msgs[1].id, "m2");
+        // Messages are now in-flight; a second peek sees nothing new.
+        auto msgs2 = s.peek_inbox("recip0000000001", 1001);
+        ASSERT_EQ(msgs2.size(), (size_t)0);
+        // inbox_size still counts in-flight messages (they're not gone yet).
+        ASSERT_EQ(s.inbox_size("recip0000000001"), 2);
+    }
+
+    TEST("ack_messages deletes specified IDs for the correct recipient");
+    {
+        Store s("");
+        s.enqueue("m1", "recip0000000001", "sender000000001", {0xAA}, 100);
+        s.enqueue("m2", "recip0000000001", "sender000000001", {0xBB}, 200);
+        s.peek_inbox("recip0000000001", 1000); // mark in-flight
+        s.ack_messages("recip0000000001", {"m1"});
+        ASSERT_EQ(s.inbox_size("recip0000000001"), 1);
+        auto msgs = s.drain_inbox("recip0000000001");
+        ASSERT_EQ(msgs.size(), (size_t)1);
+        ASSERT_EQ(msgs[0].id, "m2");
+    }
+
+    TEST("ack_messages ignores IDs that belong to a different recipient");
+    {
+        Store s("");
+        s.enqueue("m1", "recip0000000001", "sender000000001", {0xAA}, 100);
+        // Try to ACK m1 as a different recipient — must be a no-op.
+        s.ack_messages("other0000000002", {"m1"});
+        ASSERT_EQ(s.inbox_size("recip0000000001"), 1);
+    }
+
+    TEST("requeue_stale resets in_flight_at for messages older than cutoff");
+    {
+        Store s("");
+        s.enqueue("m1", "recip0000000001", "sender000000001", {0xAA}, 100);
+        s.peek_inbox("recip0000000001", 500); // marked in-flight at t=500
+        // Not yet stale (cutoff=400 < 500) — peek returns nothing.
+        s.requeue_stale(400);
+        ASSERT_EQ(s.peek_inbox("recip0000000001", 600).size(), (size_t)0);
+        // Now stale (cutoff=600 > 500) — message reset to pending.
+        s.requeue_stale(600);
+        auto msgs = s.peek_inbox("recip0000000001", 700);
+        ASSERT_EQ(msgs.size(), (size_t)1);
+        ASSERT_EQ(msgs[0].id, "m1");
+    }
+
+    TEST("sender_ids_for returns sender IDs for matching recipient+id pairs");
+    {
+        Store s("");
+        s.enqueue("m1", "recip0000000001", "sender000000001", {0xAA}, 100);
+        s.enqueue("m2", "recip0000000001", "sender000000002", {0xBB}, 200);
+        auto sids = s.sender_ids_for("recip0000000001", {"m1", "m2"});
+        ASSERT_EQ(sids.size(), (size_t)2);
+        ASSERT_EQ(sids[0], "sender000000001");
+        ASSERT_EQ(sids[1], "sender000000002");
+    }
+
+    TEST("sender_ids_for excludes IDs for wrong recipient");
+    {
+        Store s("");
+        s.enqueue("m1", "recip0000000001", "sender000000001", {0xAA}, 100);
+        // m1 belongs to recip1, not recip2
+        auto sids = s.sender_ids_for("other0000000002", {"m1"});
+        ASSERT_EQ(sids.size(), (size_t)0);
+    }
+
+    // -------------------------------------------------------
     // Rate buckets
     // -------------------------------------------------------
     TEST("put_rate_bucket / get_rate_bucket round-trip");

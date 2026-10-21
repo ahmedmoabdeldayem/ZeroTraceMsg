@@ -48,7 +48,18 @@ class Store
     void enqueue(const std::string& msg_id, const std::string& recipient_id,
                  const std::string& sender_id, const std::vector<uint8_t>& blob, int64_t ts);
     int inbox_size(const std::string& recipient_id);
-    // Returns all messages for recipient and deletes them atomically.
+    // Phase 1: return pending messages and mark them in-flight (not yet deleted).
+    std::vector<MessageRow> peek_inbox(const std::string& recipient_id, int64_t now);
+    // Returns the sender_id for each of the given message IDs that belong to recipient.
+    // Used to credit delivery acks before deletion.
+    std::vector<std::string> sender_ids_for(const std::string& recipient_id,
+                                            const std::vector<std::string>& ids);
+    // Phase 2: delete specific messages by ID after the client confirms receipt.
+    // Only deletes messages whose recipient_id matches (prevents spoofed ACKs).
+    void ack_messages(const std::string& recipient_id, const std::vector<std::string>& ids);
+    // Reset in-flight messages older than cutoff back to pending for re-delivery.
+    void requeue_stale(int64_t cutoff);
+    // Returns all messages for recipient and deletes them atomically (used by DEREGISTER/tests).
     std::vector<MessageRow> drain_inbox(const std::string& recipient_id);
     int total_messages();
     void prune_messages(int64_t min_ts);

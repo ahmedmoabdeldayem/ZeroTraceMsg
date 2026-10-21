@@ -54,9 +54,16 @@ Store::Store(const std::string& path)
          "  recipient_id TEXT NOT NULL,"
          "  sender_id    TEXT NOT NULL,"
          "  blob         BLOB NOT NULL,"
-         "  timestamp    INTEGER NOT NULL"
+         "  timestamp    INTEGER NOT NULL,"
+         "  in_flight_at INTEGER DEFAULT NULL"
          ")");
     exec("CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id)");
+    // Schema migration: add in_flight_at to databases created before this column existed.
+    try {
+        exec("ALTER TABLE messages ADD COLUMN in_flight_at INTEGER DEFAULT NULL");
+    } catch (...) {
+        // Column already present — ignore.
+    }
     exec("CREATE TABLE IF NOT EXISTS rate_buckets ("
          "  user_id      TEXT PRIMARY KEY,"
          "  count        INTEGER NOT NULL,"
@@ -232,6 +239,86 @@ std::vector<Store::MessageRow> Store::drain_inbox(const std::string& recipient_i
 
     exec("COMMIT");
     return rows;
+}
+
+std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id, int64_t now)
+{
+    exec("BEGIN");
+    std::vector<MessageRow> rows;
+
+    {
+        Stmt st;
+        check(sqlite3_prepare_v2(
+            db_,
+            "SELECT id, sender_id, blob FROM messages"
+            " WHERE recipient_id=? AND in_flight_at IS NULL ORDER BY timestamp ASC",
+            -1, &st.s, nullptr));
+        check(sqlite3_bind_text(st.s, 1, recipient_id.c_str(), -1, SQLITE_STATIC));
+        while (sqlite3_step(st.s) == SQLITE_ROW) {
+            MessageRow row;
+            row.id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
+            row.sender_id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 1));
+            const void* raw = sqlite3_column_blob(st.s, 2);
+            int len = sqlite3_column_bytes(st.s, 2);
+            row.blob.assign(static_cast<const uint8_t*>(raw),
+                            static_cast<const uint8_t*>(raw) + len);
+            rows.push_back(std::move(row));
+        }
+    }
+
+    if (!rows.empty()) {
+        Stmt st;
+        check(sqlite3_prepare_v2(
+            db_,
+            "UPDATE messages SET in_flight_at=? WHERE recipient_id=? AND in_flight_at IS NULL",
+            -1, &st.s, nullptr));
+        check(sqlite3_bind_int64(st.s, 1, now));
+        check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_step(st.s));
+    }
+
+    exec("COMMIT");
+    return rows;
+}
+
+std::vector<std::string> Store::sender_ids_for(const std::string& recipient_id,
+                                               const std::vector<std::string>& ids)
+{
+    std::vector<std::string> senders;
+    for (const auto& id : ids) {
+        Stmt st;
+        check(sqlite3_prepare_v2(
+            db_, "SELECT sender_id FROM messages WHERE id=? AND recipient_id=?", -1, &st.s,
+            nullptr));
+        check(sqlite3_bind_text(st.s, 1, id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
+        if (sqlite3_step(st.s) == SQLITE_ROW)
+            senders.emplace_back(
+                reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
+    }
+    return senders;
+}
+
+void Store::ack_messages(const std::string& recipient_id, const std::vector<std::string>& ids)
+{
+    for (const auto& id : ids) {
+        Stmt st;
+        check(sqlite3_prepare_v2(db_, "DELETE FROM messages WHERE id=? AND recipient_id=?", -1,
+                                 &st.s, nullptr));
+        check(sqlite3_bind_text(st.s, 1, id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_step(st.s));
+    }
+}
+
+void Store::requeue_stale(int64_t cutoff)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "UPDATE messages SET in_flight_at=NULL WHERE in_flight_at>0 AND in_flight_at<?", -1,
+        &st.s, nullptr));
+    check(sqlite3_bind_int64(st.s, 1, cutoff));
+    check(sqlite3_step(st.s));
 }
 
 int Store::total_messages()

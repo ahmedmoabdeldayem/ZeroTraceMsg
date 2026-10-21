@@ -53,9 +53,11 @@ Client                            Server
   │◄──── OK ───────────────────────  │
   │                                  │
   ├── POLL <user_id> <token> ──────► │  check inbox (repeat on interval)
-  │◄──── MSG <msg_id> <blob_hex> ──  │  zero or more messages
+  │◄──── MSG <msg_id> <blob_hex> ──  │  zero or more messages (now in-flight)
   │◄──── ACK <N> ──────────────────  │  optional delivery confirmation
   │◄──── NOMSG ────────────────────  │  always the final POLL line
+  │                                  │
+  ├── MSGACK <id> <token> <ids> ───► │  confirm receipt; server deletes messages
   │                                  │
   ├── DEREGISTER <user_id> <token> ► │  optional right-to-erasure
   │◄──── OK ───────────────────────  │
@@ -244,6 +246,40 @@ messages are permanently lost. A two-phase ACK mechanism (future roadmap) will a
 
 ---
 
+### MSGACK — confirm message receipt (phase 2 of delivery)
+
+Must be sent after each POLL that returned at least one `MSG` line. The server deletes
+the confirmed messages and credits delivery acknowledgements to their senders.
+
+Until MSGACK is received the messages are held in an **in-flight** state. If the client
+crashes before sending MSGACK, the server re-queues in-flight messages as pending after
+a stale timeout (2 × `cleanup_interval_min`; default 20 minutes), so the client receives
+them again on the next POLL after reconnecting.
+
+**Request**
+
+```
+MSGACK <user_id> <token> <id1,id2,...>
+```
+
+| Field | Description |
+|---|---|
+| user_id | User's user_id (16 hex chars) |
+| token | Session token from REGISTER (64 hex chars) |
+| id1,id2,… | Comma-separated message IDs from the preceding POLL |
+
+**Responses**
+
+| Response | Meaning |
+|---|---|
+| `OK` | Messages deleted; delivery acks credited to senders |
+| `ERR invalid token` | Token missing, wrong, or expired |
+
+ACKing an ID that does not exist or belongs to a different recipient is silently ignored
+(idempotent — safe to retry).
+
+---
+
 ### DEREGISTER — delete all server-side user data
 
 Implements the GDPR right to erasure. Removes the public key, session token, all queued
@@ -423,7 +459,7 @@ All errors follow the form `ERR <description>`. The description is a fixed ASCII
 | `user_id already registered with a different key` | REGISTER | Key-change attempt rejected |
 | `invalid pubkey` | REGISTER | Hex decode of pubkey_hex failed |
 | `unknown user` | GETKEY | No registered user with that user_id |
-| `invalid token` | SEND, POLL, DEREGISTER | Token absent, wrong, or session expired |
+| `invalid token` | SEND, POLL, MSGACK, DEREGISTER | Token absent, wrong, or session expired |
 | `rate limit exceeded` | SEND | Sender exceeded `rate_limit_msgs` per `rate_limit_window_s` |
 | `unknown recipient` | SEND | No registered user with that recipient_id |
 | `recipient inbox is full` | SEND | Recipient's inbox at `max_inbox_messages` |
