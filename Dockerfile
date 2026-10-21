@@ -9,9 +9,10 @@ WORKDIR /src
 
 # Build Botan 3.14.0 from vendored source.
 # This layer is cached until botan-src/ changes, so normal code iterations are fast.
+# --libdir prevents Debian's multiarch layout from installing to lib/x86_64-linux-gnu.
 COPY botan-src/ botan-src/
 RUN cd botan-src && \
-    python3 configure.py --prefix=/usr/local && \
+    python3 configure.py --prefix=/usr/local --libdir=/usr/local/lib && \
     make -j"$(nproc)" && \
     make install
 
@@ -42,10 +43,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Non-root service account
 RUN useradd --system --no-create-home --shell /usr/sbin/nologin zerotrace
 
-# Botan shared library. The versioned file is the real artifact;
-# ldconfig regenerates the SONAME symlink (libbotan-3.so.3) automatically.
-COPY --from=builder /usr/local/lib/libbotan-3.so.3.14.0 /usr/local/lib/
-RUN ldconfig
+# Copy the Botan shared library without hardcoding the versioned filename.
+# --mount binds the builder's lib dir into the RUN context so nothing is added
+# to the final image layer; find locates the real .so (skipping symlinks).
+RUN --mount=type=bind,from=builder,source=/usr/local/lib,target=/builder-lib \
+    find /builder-lib -maxdepth 1 -name 'libbotan-3.so*' ! -type l \
+        -exec install -m 755 {} /usr/local/lib/ \; \
+    && ldconfig
 
 # Application binaries
 COPY --from=builder /src/build/msg_server /usr/local/bin/msg_server
