@@ -483,6 +483,117 @@ static int make_listening_socket(int port, const std::string& bind_addr)
     return server_fd;
 }
 
+// ── admin server ──────────────────────────────────────────────────────────────
+// Plain TCP, 127.0.0.1 only. Commands: STATS, LIST_USERS, KICK, RELOAD.
+
+static void handle_admin_client(int fd)
+{
+    auto send_line_raw = [fd](const std::string& s) {
+        std::string msg = s + "\n";
+        ::send(fd, msg.data(), msg.size(), 0);
+    };
+    auto read_line_raw = [fd]() {
+        std::string line;
+        char c;
+        while (::recv(fd, &c, 1, 0) > 0) {
+            if (c == '\n')
+                break;
+            if (line.size() >= MAX_LINE_LEN)
+                return std::string{};
+            line += c;
+        }
+        return line;
+    };
+
+    while (true) {
+        std::string line = read_line_raw();
+        if (line.empty())
+            break;
+
+        std::istringstream ss(line);
+        std::string cmd;
+        ss >> cmd;
+
+        if (cmd == "STATS") {
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            int64_t uptime = now_unix() - g_start_time;
+            send_line_raw("OK users=" + std::to_string(s.user_count()) +
+                          " sessions=" + std::to_string(s.session_count()) +
+                          " messages=" + std::to_string(s.total_messages()) +
+                          " connections=" + std::to_string(g_active_connections.load()) +
+                          " uptime=" + std::to_string(uptime));
+
+        } else if (cmd == "LIST_USERS") {
+            std::lock_guard<std::mutex> lock(store_mutex);
+            for (const auto& id : get_store().list_users())
+                send_line_raw("USER " + id);
+            send_line_raw("END");
+
+        } else if (cmd == "KICK") {
+            std::string user_id;
+            ss >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.user_exists(user_id)) {
+                send_line_raw("ERR unknown user");
+            } else {
+                s.remove_user(user_id);
+                s.remove_session(user_id);
+                s.remove_rate_bucket(user_id);
+                s.drain_inbox(user_id);
+                s.drain_ack(user_id);
+                send_line_raw("OK");
+                LOG_INFO("[ADMIN] KICK user=" + user_id);
+            }
+
+        } else if (cmd == "RELOAD") {
+            g_reload_config.store(true);
+            send_line_raw("OK");
+            LOG_INFO("[ADMIN] RELOAD requested");
+
+        } else {
+            send_line_raw("ERR unknown command");
+        }
+    }
+
+    close(fd);
+}
+
+static void admin_thread(int admin_fd)
+{
+    while (true) {
+        int cfd = accept(admin_fd, nullptr, nullptr);
+        if (cfd < 0)
+            continue;
+        std::thread([cfd]() { handle_admin_client(cfd); }).detach();
+    }
+}
+
+static void start_admin_server(const Config& cfg)
+{
+    if (cfg.admin_port <= 0)
+        return;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1"); // admin port is localhost-only
+    addr.sin_port = htons(static_cast<uint16_t>(cfg.admin_port));
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        LOG_WARN("[ADMIN] Cannot bind admin port " + std::to_string(cfg.admin_port));
+        close(fd);
+        return;
+    }
+    listen(fd, 16);
+    LOG_INFO("[ADMIN] Admin port listening on 127.0.0.1:" + std::to_string(cfg.admin_port));
+    std::thread([fd]() { admin_thread(fd); }).detach();
+}
+
 // ── plain TCP server (tests) ──────────────────────────────────────────────────
 
 void start_server(int port)
@@ -641,6 +752,7 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
         return;
     LOG_INFO("[*] Server listening on " + cfg.server_bind + ":" + std::to_string(cfg.server_port) +
              " (TLS " + cfg.tls_min_version + "+)");
+    start_admin_server(cfg);
     std::thread([cfg]() { cleanup_thread(cfg); }).detach();
 
     struct pollfd pfd = {server_fd, POLLIN, 0};

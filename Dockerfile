@@ -21,6 +21,7 @@ COPY Makefile .
 COPY common/ common/
 COPY server/ server/
 COPY client/ client/
+COPY admin/ admin/
 
 # Build server and client against the system-installed Botan.
 RUN make all \
@@ -54,6 +55,7 @@ RUN --mount=type=bind,from=builder,source=/usr/local/lib,target=/builder-lib \
 # Application binaries
 COPY --from=builder /src/build/msg_server /usr/local/bin/msg_server
 COPY --from=builder /src/build/msg_client /usr/local/bin/msg_client
+COPY --from=builder /src/build/msg_admin /usr/local/bin/msg_admin
 
 # Persistent state: SQLite database + auto-generated TLS certs
 RUN install -d -o zerotrace -g zerotrace \

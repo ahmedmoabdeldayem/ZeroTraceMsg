@@ -25,6 +25,8 @@ struct Config {
     std::string key_path = "certs/server.key.pem";
     // [local] db_path: SQLite database file. Empty string = in-memory (for tests).
     std::string db_path = "zerotrace.db";
+    // Admin port bound to 127.0.0.1. 0 = disabled.
+    int admin_port = 9998;
 
     // ── [client] ────────────────────────────────────────────────────────
     std::string client_server = "127.0.0.1";

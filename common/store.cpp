@@ -116,6 +116,17 @@ int Store::user_count()
     return sqlite3_column_int(st.s, 0);
 }
 
+std::vector<std::string> Store::list_users()
+{
+    Stmt st;
+    check(
+        sqlite3_prepare_v2(db_, "SELECT user_id FROM users ORDER BY user_id", -1, &st.s, nullptr));
+    std::vector<std::string> ids;
+    while (sqlite3_step(st.s) == SQLITE_ROW)
+        ids.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
+    return ids;
+}
+
 void Store::remove_user(const std::string& user_id)
 {
     Stmt st;

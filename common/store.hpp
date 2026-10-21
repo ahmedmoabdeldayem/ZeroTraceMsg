@@ -26,6 +26,7 @@ class Store
     std::optional<std::vector<uint8_t>> get_pubkey(const std::string& user_id);
     bool user_exists(const std::string& user_id);
     int user_count();
+    std::vector<std::string> list_users();
     void remove_user(const std::string& user_id);
 
     // ── sessions ──────────────────────────────────────────────────────────────
