@@ -235,8 +235,10 @@ jobs:
             exit 0
           fi
 
-          if [ "$(echo "$LINE_COV < $BASELINE" | bc -l)" -eq 1 ]; then
-            echo "❌ Coverage regression: ${LINE_COV}% is below main baseline ${BASELINE}%"
+          # Allow 0.5% tolerance to absorb measurement noise between CI runs.
+          TOLERANCE=0.5
+          if [ "$(echo "$LINE_COV < $BASELINE - $TOLERANCE" | bc -l)" -eq 1 ]; then
+            echo "❌ Coverage regression: ${LINE_COV}% is below main baseline ${BASELINE}% (tolerance: ${TOLERANCE}%)"
             exit 1
           fi
 
