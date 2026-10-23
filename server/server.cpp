@@ -104,6 +104,8 @@ static std::atomic<bool> g_shutdown{false};
 static std::atomic<bool> g_reload_config{false};
 static std::atomic<bool> g_log_reopen{false};
 static std::atomic<int> g_active_connections{0};
+static std::atomic<int64_t> g_messages_sent_total{0};
+static std::atomic<int64_t> g_rate_limit_hits_total{0};
 static int64_t g_start_time = 0;
 static std::string g_config_path;
 
@@ -280,6 +282,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                     }
                 }
                 if (count >= cfg.rate_limit_msgs) {
+                    g_rate_limit_hits_total.fetch_add(1);
                     sl("ERR rate limit exceeded");
                     continue;
                 }
@@ -304,6 +307,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 }
                 std::string msg_id = new_message_id();
                 s.enqueue(msg_id, recipient_id, sender_id, blob, now_unix());
+                g_messages_sent_total.fetch_add(1);
                 sl("OK");
                 LOG_INFO("[SEND]     to=" + recipient_id + " msg_id=" + msg_id + " blob=" +
                          std::to_string(blob.size()) + " bytes (server cannot read content)");
@@ -481,6 +485,100 @@ static int make_listening_socket(int port, const std::string& bind_addr)
     }
     listen(server_fd, SOMAXCONN);
     return server_fd;
+}
+
+// ── Prometheus metrics server ─────────────────────────────────────────────────
+// Serves /metrics in Prometheus text exposition format (version 0.0.4).
+// Plain HTTP, no auth — bind to a firewalled interface in production.
+
+static std::string build_metrics_text()
+{
+    std::lock_guard<std::mutex> lock(store_mutex);
+    Store& s = get_store();
+    int64_t uptime = (g_start_time > 0) ? (now_unix() - g_start_time) : 0;
+
+    std::ostringstream out;
+    auto write_metric = [&](const char* name, const char* type, const char* help, int64_t val) {
+        out << "# HELP " << name << " " << help << "\n";
+        out << "# TYPE " << name << " " << type << "\n";
+        out << name << " " << val << "\n";
+    };
+
+    write_metric("zerotrace_users_total", "gauge", "Registered users", s.user_count());
+    write_metric("zerotrace_sessions_active", "gauge", "Active sessions", s.session_count());
+    write_metric("zerotrace_messages_pending", "gauge", "Messages pending in all inboxes",
+                 s.total_messages());
+    write_metric("zerotrace_connections_active", "gauge", "Active TLS connections",
+                 g_active_connections.load());
+    write_metric("zerotrace_uptime_seconds", "gauge", "Server uptime in seconds", uptime);
+    write_metric("zerotrace_messages_sent_total", "counter", "Messages sent successfully",
+                 g_messages_sent_total.load());
+    write_metric("zerotrace_rate_limit_hits_total", "counter", "Messages rejected by rate limiter",
+                 g_rate_limit_hits_total.load());
+
+    return out.str();
+}
+
+static void handle_metrics_client(int fd)
+{
+    // Drain the HTTP request headers (we don't need to parse them).
+    char buf[4096];
+    std::string req;
+    while (req.find("\r\n\r\n") == std::string::npos) {
+        ssize_t n = ::recv(fd, buf, sizeof(buf) - 1, 0);
+        if (n <= 0)
+            break;
+        buf[n] = '\0';
+        req.append(buf, n);
+        if (req.size() > 8192)
+            break;
+    }
+
+    std::string body = build_metrics_text();
+    std::ostringstream resp;
+    resp << "HTTP/1.1 200 OK\r\n"
+         << "Content-Type: text/plain; version=0.0.4; charset=utf-8\r\n"
+         << "Content-Length: " << body.size() << "\r\n"
+         << "Connection: close\r\n"
+         << "\r\n"
+         << body;
+    std::string resp_str = resp.str();
+    ::send(fd, resp_str.data(), resp_str.size(), 0);
+    close(fd);
+}
+
+static void metrics_accept_loop(int metrics_fd)
+{
+    while (true) {
+        int cfd = accept(metrics_fd, nullptr, nullptr);
+        if (cfd < 0)
+            continue;
+        std::thread([cfd]() { handle_metrics_client(cfd); }).detach();
+    }
+}
+
+static void start_metrics_server(const Config& cfg)
+{
+    if (cfg.metrics_port <= 0)
+        return;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(static_cast<uint16_t>(cfg.metrics_port));
+    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        LOG_WARN("[METRICS] Cannot bind metrics port " + std::to_string(cfg.metrics_port));
+        close(fd);
+        return;
+    }
+    listen(fd, 16);
+    LOG_INFO("[METRICS] Prometheus metrics on :" + std::to_string(cfg.metrics_port) + "/metrics");
+    std::thread([fd]() { metrics_accept_loop(fd); }).detach();
 }
 
 // ── admin server ──────────────────────────────────────────────────────────────
@@ -753,6 +851,7 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
     LOG_INFO("[*] Server listening on " + cfg.server_bind + ":" + std::to_string(cfg.server_port) +
              " (TLS " + cfg.tls_min_version + "+)");
     start_admin_server(cfg);
+    start_metrics_server(cfg);
     std::thread([cfg]() { cleanup_thread(cfg); }).detach();
 
     struct pollfd pfd = {server_fd, POLLIN, 0};

@@ -27,6 +27,8 @@ struct Config {
     std::string db_path = "zerotrace.db";
     // Admin port bound to 127.0.0.1. 0 = disabled.
     int admin_port = 9998;
+    // Prometheus metrics HTTP port (0.0.0.0). 0 = disabled.
+    int metrics_port = 9997;
 
     // ── [client] ────────────────────────────────────────────────────────
     std::string client_server = "127.0.0.1";
