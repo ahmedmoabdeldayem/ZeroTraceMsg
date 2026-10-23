@@ -59,6 +59,9 @@ Client                            Server
   │                                  │
   ├── MSGACK <id> <token> <ids> ───► │  confirm receipt; server deletes messages
   │                                  │
+  ├── REKEY <old_id> <tok> <new_id> <key> ► │  optional key rotation
+  │◄──── OK <new_token> ──────────  │
+  │                                  │
   ├── DEREGISTER <user_id> <token> ► │  optional right-to-erasure
   │◄──── OK ───────────────────────  │
   │                                  │
@@ -300,6 +303,55 @@ DEREGISTER <user_id> <token>
 
 ---
 
+### REKEY — rotate to a new keypair
+
+Replaces the caller's long-term keypair with a new one in a single atomic operation.
+Pending inbox messages are migrated to the new identity so they are not lost.
+The old identity (public key, session, rate-limit state) is deleted.
+
+Use this command to rotate keys after a suspected compromise, on a scheduled basis,
+or whenever a fresh post-quantum keypair is desired.
+
+**Request**
+
+```
+REKEY <old_user_id> <old_token> <new_user_id> <new_pubkey_hex>
+```
+
+| Field | Description |
+|---|---|
+| old_user_id | Current user_id (16 hex chars) |
+| old_token | Current session token (64 hex chars) |
+| new_user_id | New user_id derived from new pubkey: `hex(SHA-256(new_pubkey)[0:8])` |
+| new_pubkey_hex | New public key bytes, hex-encoded |
+
+**Success response**
+
+```
+OK <new_token>
+```
+
+`new_token` is a fresh 64 hex-char session token for the new identity.
+The caller must update their local identity file and inform contacts of the new user_id.
+
+**Error responses**
+
+| Error string | Meaning |
+|---|---|
+| `ERR invalid token` | old_token missing, wrong, or session expired |
+| `ERR pubkey size mismatch for configured KEM` | new pubkey length wrong for server's KEM |
+| `ERR new user_id does not match new pubkey` | new_user_id ≠ hex(SHA-256(new_pubkey)[0:8]) |
+| `ERR cannot rekey to the same identity` | new_user_id equals old_user_id |
+| `ERR new user_id already registered with a different key` | Key conflict for new_user_id |
+| `ERR invalid pubkey` | Hex decode of new_pubkey_hex failed |
+| `ERR missing arguments` | One or more fields empty |
+
+**Atomicity guarantee:** The server performs all mutations under a single lock:
+register new identity → migrate inbox → carry over delivery acks → delete old identity.
+Either the full rotation succeeds or the original state is unchanged.
+
+---
+
 ### Unknown command
 
 Any unrecognized command verb receives:
@@ -465,6 +517,11 @@ All errors follow the form `ERR <description>`. The description is a fixed ASCII
 | `recipient inbox is full` | SEND | Recipient's inbox at `max_inbox_messages` |
 | `blob too large` | SEND | Blob exceeds `kem_ct_len + padded_plaintext + 16` |
 | `invalid blob` | SEND | Hex decode of blob_hex failed |
+| `invalid token` | REKEY | old_token missing, wrong, or session expired |
+| `new user_id does not match new pubkey` | REKEY | new_user_id derivation mismatch |
+| `cannot rekey to the same identity` | REKEY | new_user_id equals old_user_id |
+| `new user_id already registered with a different key` | REKEY | Key conflict for new_user_id |
+| `missing arguments` | REKEY | One or more required fields empty |
 | `unknown command` | any | Unrecognised command verb |
 
 ---

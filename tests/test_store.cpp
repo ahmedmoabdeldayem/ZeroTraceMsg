@@ -322,5 +322,33 @@ int main()
         ASSERT_EQ(s.drain_ack("aabbccdd11223344"), 0);
     }
 
+    // -------------------------------------------------------
+    // migrate_inbox
+    // -------------------------------------------------------
+    TEST("migrate_inbox reassigns all messages to new recipient");
+    {
+        Store s("");
+        s.enqueue("m1", "old0000000000001", "sender000000001", {0xAA}, 100);
+        s.enqueue("m2", "old0000000000001", "sender000000002", {0xBB}, 200);
+        ASSERT_EQ(s.inbox_size("old0000000000001"), 2);
+        ASSERT_EQ(s.inbox_size("new0000000000001"), 0);
+
+        s.migrate_inbox("old0000000000001", "new0000000000001");
+
+        ASSERT_EQ(s.inbox_size("old0000000000001"), 0);
+        ASSERT_EQ(s.inbox_size("new0000000000001"), 2);
+        auto msgs = s.drain_inbox("new0000000000001");
+        ASSERT_EQ(msgs.size(), (size_t)2);
+        ASSERT_EQ(msgs[0].id, "m1");
+        ASSERT_EQ(msgs[1].id, "m2");
+    }
+
+    TEST("migrate_inbox on empty inbox is a no-op");
+    {
+        Store s("");
+        s.migrate_inbox("nobody000000001", "someone00000001");
+        ASSERT_EQ(s.inbox_size("someone00000001"), 0);
+    }
+
     SUITE_RESULTS();
 }
