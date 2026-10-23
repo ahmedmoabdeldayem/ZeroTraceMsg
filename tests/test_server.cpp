@@ -33,6 +33,9 @@ static const int TEST_CERT_GEN_PORT = 59992;
 // TLS server with admin port enabled
 static const int TEST_ADMIN_TLS_PORT = 59991;
 static const int TEST_ADMIN_PORT = 59990;
+// TLS server with metrics port enabled
+static const int TEST_METRICS_TLS_PORT = 59989;
+static const int TEST_METRICS_PORT = 59988;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -315,6 +318,16 @@ int main()
         cfg.admin_port = TEST_ADMIN_PORT;
         cfg.cert_path = "/tmp/ztm_admin.cert.pem";
         cfg.key_path = "/tmp/ztm_admin.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // TLS server with metrics port enabled (covers Prometheus metrics paths)
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_METRICS_TLS_PORT;
+        cfg.admin_port = 0;
+        cfg.metrics_port = TEST_METRICS_PORT;
+        cfg.cert_path = "/tmp/ztm_metrics.cert.pem";
+        cfg.key_path = "/tmp/ztm_metrics.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -1207,6 +1220,113 @@ int main()
         // so ensure_server_cert must have generated them.
         ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen.cert.pem").good());
         ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen.key.pem").good());
+    }
+
+    // -------------------------------------------------------
+    // Prometheus metrics
+    // -------------------------------------------------------
+
+    // Helper: send a minimal HTTP GET to the metrics port and return the full response.
+    auto scrape_metrics = []() -> std::string {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(TEST_METRICS_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            close(fd);
+            return "";
+        }
+        std::string req = "GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        ::send(fd, req.data(), req.size(), 0);
+        std::string resp;
+        char buf[4096];
+        ssize_t n;
+        while ((n = ::recv(fd, buf, sizeof(buf) - 1, 0)) > 0) {
+            buf[n] = '\0';
+            resp.append(buf, n);
+        }
+        close(fd);
+        return resp;
+    };
+
+    TEST("metrics endpoint returns HTTP 200 with Prometheus content-type");
+    {
+        std::string resp = scrape_metrics();
+        ASSERT_TRUE(resp.find("HTTP/1.1 200 OK") != std::string::npos);
+        ASSERT_TRUE(resp.find("text/plain") != std::string::npos);
+        ASSERT_TRUE(resp.find("version=0.0.4") != std::string::npos);
+    }
+
+    TEST("metrics response contains all expected metric names");
+    {
+        std::string resp = scrape_metrics();
+        ASSERT_TRUE(resp.find("zerotrace_users_total") != std::string::npos);
+        ASSERT_TRUE(resp.find("zerotrace_sessions_active") != std::string::npos);
+        ASSERT_TRUE(resp.find("zerotrace_messages_pending") != std::string::npos);
+        ASSERT_TRUE(resp.find("zerotrace_connections_active") != std::string::npos);
+        ASSERT_TRUE(resp.find("zerotrace_uptime_seconds") != std::string::npos);
+        ASSERT_TRUE(resp.find("zerotrace_messages_sent_total") != std::string::npos);
+        ASSERT_TRUE(resp.find("zerotrace_rate_limit_hits_total") != std::string::npos);
+    }
+
+    TEST("metrics response includes HELP and TYPE lines for each metric");
+    {
+        std::string resp = scrape_metrics();
+        ASSERT_TRUE(resp.find("# HELP zerotrace_users_total") != std::string::npos);
+        ASSERT_TRUE(resp.find("# TYPE zerotrace_users_total gauge") != std::string::npos);
+        ASSERT_TRUE(resp.find("# TYPE zerotrace_messages_sent_total counter") != std::string::npos);
+        ASSERT_TRUE(resp.find("# TYPE zerotrace_rate_limit_hits_total counter") !=
+                    std::string::npos);
+    }
+
+    TEST("metrics_sent counter increments after a successful SEND");
+    {
+        reset_server_state();
+        // Register two users on the metrics TLS server
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_METRICS_TLS_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string s_tok = extract_token(tls_cmd(
+            conn, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        tls_cmd(conn,
+                "REGISTER " + recipient.user_id + " " + Botan::hex_encode(recipient.pubkey_bytes));
+
+        // Scrape before send
+        std::string before = scrape_metrics();
+
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        tls_cmd(conn, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                          Botan::hex_encode(blob));
+        close(conn.fd);
+
+        // Scrape after send — zerotrace_messages_sent_total must be higher
+        std::string after = scrape_metrics();
+        // Extract the value after "zerotrace_messages_sent_total "
+        auto extract_val = [](const std::string& text, const std::string& key) -> int64_t {
+            // Skip past HELP/TYPE lines — find the bare metric line (no leading #)
+            size_t pos = 0;
+            while (pos != std::string::npos) {
+                pos = text.find(key, pos);
+                if (pos == std::string::npos)
+                    break;
+                // Must not be a # comment line — look backwards to the start of the line
+                size_t line_start = text.rfind('\n', pos);
+                line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+                if (text[line_start] != '#') {
+                    size_t val_start = pos + key.size() + 1;
+                    if (val_start < text.size())
+                        return std::stoll(text.substr(val_start));
+                }
+                pos += key.size();
+            }
+            return -1;
+        };
+        int64_t sent_before = extract_val(before, "zerotrace_messages_sent_total");
+        int64_t sent_after = extract_val(after, "zerotrace_messages_sent_total");
+        ASSERT_TRUE(sent_before >= 0);
+        ASSERT_TRUE(sent_after > sent_before);
     }
 
     SUITE_RESULTS();

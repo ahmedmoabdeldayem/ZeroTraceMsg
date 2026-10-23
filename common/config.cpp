@@ -72,6 +72,8 @@ void Config::validate() const
         throw std::invalid_argument("server.rate_limit_window_s must be >= 1");
     if (admin_port < 0 || admin_port > 65535)
         throw std::invalid_argument("server.admin_port must be 0 (disabled) or 1–65535");
+    if (metrics_port < 0 || metrics_port > 65535)
+        throw std::invalid_argument("server.metrics_port must be 0 (disabled) or 1–65535");
 
     // client
     if (client_port < 1 || client_port > 65535)
@@ -219,6 +221,8 @@ Config Config::load(const std::string& path)
                     cfg.db_path = val;
                 else if (key == "admin_port")
                     cfg.admin_port = parse_int(val, key);
+                else if (key == "metrics_port")
+                    cfg.metrics_port = parse_int(val, key);
                 else
                     bad("unknown key in [server]: " + key);
 
