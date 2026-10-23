@@ -601,11 +601,15 @@ int main(int argc, char* argv[])
     std::string username = argv[1];
     std::string server_ip = argv[2];
 
-    // Optional --config flag
+    // Optional flags
     std::string config_path = "zerotrace.conf";
-    for (int i = 3; i < argc - 1; ++i) {
-        if (std::string(argv[i]) == "--config")
-            config_path = argv[i + 1];
+    bool do_rekey = false;
+    for (int i = 3; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--config" && i + 1 < argc)
+            config_path = argv[++i];
+        else if (a == "--rekey")
+            do_rekey = true;
     }
     try {
         g_cfg = Config::load(config_path);
@@ -684,6 +688,39 @@ int main(int argc, char* argv[])
     if (!do_register(fd)) {
         std::cerr << "Registration failed.\n";
         return 1;
+    }
+
+    // -------------------------------------------------------
+    // Key rotation mode (--rekey)
+    // -------------------------------------------------------
+    if (do_rekey) {
+        Identity new_id = generate_identity(rng, g_cfg);
+        std::string resp;
+        {
+            std::lock_guard<std::mutex> lock(socket_mutex);
+            send_line(fd, "REKEY " + identity.user_id + " " + session_token + " " + new_id.user_id +
+                              " " + Botan::hex_encode(new_id.pubkey_bytes));
+            resp = read_line(fd);
+        }
+
+        if (resp.size() < 3 || resp.substr(0, 3) != "OK ") {
+            std::cerr << "[rekey failed] " << resp << "\n";
+            close(fd);
+            return 1;
+        }
+
+        std::cout << "Key rotation successful.\n";
+        std::cout << "Old ID: " << identity.user_id << "\n";
+        std::cout << "New ID: " << new_id.user_id << "\n";
+        std::cout << "Share your new ID with your contacts.\n";
+
+        auto new_pass = read_passphrase("Set new passphrase: ");
+        save_identity(new_id, new_pass, identity_file, rng, g_cfg);
+        chmod(identity_file.c_str(), 0600);
+        std::cout << "New identity saved to " << identity_file << "\n";
+
+        close(fd);
+        return 0;
     }
 
     load_contacts(contacts_file);

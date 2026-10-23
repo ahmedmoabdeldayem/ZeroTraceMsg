@@ -338,6 +338,16 @@ int Store::total_messages()
     return sqlite3_column_int(st.s, 0);
 }
 
+void Store::migrate_inbox(const std::string& old_recipient_id, const std::string& new_recipient_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "UPDATE messages SET recipient_id=? WHERE recipient_id=?", -1,
+                             &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, new_recipient_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, old_recipient_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
 void Store::prune_messages(int64_t min_ts)
 {
     Stmt st;

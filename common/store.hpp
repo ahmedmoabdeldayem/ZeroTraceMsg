@@ -62,6 +62,8 @@ class Store
     void requeue_stale(int64_t cutoff);
     // Returns all messages for recipient and deletes them atomically (used by DEREGISTER/tests).
     std::vector<MessageRow> drain_inbox(const std::string& recipient_id);
+    // Reassign all messages from old_recipient to new_recipient (used by REKEY).
+    void migrate_inbox(const std::string& old_recipient_id, const std::string& new_recipient_id);
     int total_messages();
     void prune_messages(int64_t min_ts);
 

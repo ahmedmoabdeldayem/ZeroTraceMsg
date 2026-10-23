@@ -207,7 +207,7 @@ static std::vector<std::vector<uint8_t>> poll_all(int fd, const std::string& use
     std::vector<std::string> ids;
     while (true) {
         std::string line = read_line(fd);
-        if (line == "NOMSG" || line.empty())
+        if (line == "NOMSG" || line.empty() || line.substr(0, 3) == "ERR")
             break;
         if (line.substr(0, 4) == "MSG ") {
             std::istringstream ss(line.substr(4));
@@ -1213,6 +1213,134 @@ int main()
     // -------------------------------------------------------
     // Cert generation path
     // -------------------------------------------------------
+
+    // -------------------------------------------------------
+    // REKEY
+    // -------------------------------------------------------
+    TEST("REKEY replaces pubkey, issues new token, old session gone");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string old_tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        ASSERT_TRUE(!old_tok.empty());
+
+        auto new_id = generate_identity(rng, g_cfg);
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + old_tok + " " + new_id.user_id +
+                                       " " + Botan::hex_encode(new_id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string new_tok = resp.substr(3);
+        ASSERT_EQ(new_tok.size(), (size_t)64);
+
+        // New identity is registered and fetchable
+        std::string kr = cmd(fd, "GETKEY " + new_id.user_id);
+        ASSERT_TRUE(kr.substr(0, 3) == "OK ");
+
+        // Old identity is gone
+        std::string old_kr = cmd(fd, "GETKEY " + id.user_id);
+        ASSERT_TRUE(old_kr.substr(0, 3) == "ERR");
+
+        // Old token no longer works
+        std::string poll_resp = cmd(fd, "POLL " + id.user_id + " " + old_tok);
+        ASSERT_TRUE(poll_resp.substr(0, 3) == "ERR");
+
+        close(fd);
+    }
+
+    TEST("REKEY rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        auto new_id = generate_identity(rng, g_cfg);
+        std::string resp =
+            cmd(fd, "REKEY " + id.user_id + " " + std::string(64, '0') + " " + new_id.user_id +
+                        " " + Botan::hex_encode(new_id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REKEY rejects pubkey size mismatch");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Send 65 bytes instead of the required KEM pubkey length
+        std::vector<uint8_t> wrong(65, 0xAB);
+        std::string fake_id = derive_user_id(wrong);
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + fake_id + " " +
+                                       Botan::hex_encode(wrong));
+        ASSERT_TRUE(resp.find("mismatch") != std::string::npos || resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REKEY rejects new user_id / pubkey derivation mismatch");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto new_id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Pass new_id pubkey but a completely wrong user_id
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + std::string(16, '0') +
+                                       " " + Botan::hex_encode(new_id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REKEY rejects attempt to rekey to the same identity");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + id.user_id + " " +
+                                       Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REKEY migrates pending inbox messages to new identity");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+
+        // Send a message to recipient's old identity
+        auto blob = encrypt_message("hi", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+
+        // Recipient rotates their key
+        auto new_recip = generate_identity(rng, g_cfg);
+        std::string rekey_resp =
+            cmd(fd, "REKEY " + recipient.user_id + " " + r_tok + " " + new_recip.user_id + " " +
+                        Botan::hex_encode(new_recip.pubkey_bytes));
+        ASSERT_TRUE(rekey_resp.substr(0, 3) == "OK ");
+        std::string new_r_tok = rekey_resp.substr(3);
+
+        // Message must be in the new inbox
+        auto msgs = poll_all(fd, new_recip.user_id, new_r_tok);
+        ASSERT_EQ(msgs.size(), (size_t)1);
+
+        // Old inbox is gone
+        auto old_msgs = poll_all(fd, recipient.user_id, r_tok);
+        ASSERT_EQ(old_msgs.size(), (size_t)0);
+
+        close(fd);
+    }
 
     TEST("ensure_server_cert: cert and key files are created on first start");
     {
