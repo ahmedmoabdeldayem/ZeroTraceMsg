@@ -78,6 +78,8 @@ void Config::validate() const
         throw std::invalid_argument("server.max_prekeys_per_user must be >= 0");
     if (prekey_batch_size < 1)
         throw std::invalid_argument("server.prekey_batch_size must be >= 1");
+    if (max_devices_per_user < 0)
+        throw std::invalid_argument("server.max_devices_per_user must be >= 0");
 
     // client
     if (client_port < 1 || client_port > 65535)
@@ -231,6 +233,8 @@ Config Config::load(const std::string& path)
                     cfg.max_prekeys_per_user = parse_int(val, key);
                 else if (key == "prekey_batch_size")
                     cfg.prekey_batch_size = parse_int(val, key);
+                else if (key == "max_devices_per_user")
+                    cfg.max_devices_per_user = parse_int(val, key);
                 else
                     bad("unknown key in [server]: " + key);
 

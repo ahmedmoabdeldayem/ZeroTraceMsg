@@ -375,38 +375,55 @@ static bool do_register(int fd)
 // -------------------------------------------------------
 // Send an encrypted message to recipient
 // -------------------------------------------------------
+// Send one encrypted message to a single target_id (may be primary or a linked device).
+static void send_to_one(int fd, const std::string& target_id, const std::string& text)
+{
+    std::vector<uint8_t> encrypt_pub;
+    std::string prekey_id = "_";
+    {
+        std::lock_guard<std::mutex> lock(socket_mutex);
+        send_line(fd, "GETPREKEY " + target_id);
+        std::string resp = read_line(fd);
+        if (resp.size() < 3 || resp.substr(0, 3) != "OK ")
+            return;
+        std::istringstream ss(resp.substr(3));
+        std::string id_pub_hex, pk_id_or_none, pk_pub_hex;
+        ss >> id_pub_hex >> pk_id_or_none >> pk_pub_hex;
+        encrypt_pub = (pk_id_or_none == "NONE") ? Botan::hex_decode(id_pub_hex)
+                                                : Botan::hex_decode(pk_pub_hex);
+        if (pk_id_or_none != "NONE")
+            prekey_id = pk_id_or_none;
+    }
+    auto blob = encrypt_message(text, identity.user_id, username_local, encrypt_pub, rng, g_cfg);
+    {
+        std::lock_guard<std::mutex> lock(socket_mutex);
+        send_line(fd, "SEND " + identity.user_id + " " + session_token + " " + target_id + " " +
+                          prekey_id + " " + Botan::hex_encode(blob));
+        read_line(fd);
+    }
+}
+
 static void do_send(int fd, const std::string& recipient_id, const std::string& text)
 {
     try {
-        std::vector<uint8_t> encrypt_pub;
-        std::string prekey_id = "_";
-        std::vector<uint8_t> blob;
+        // Send to the primary recipient.
+        send_to_one(fd, recipient_id, text);
+
+        // Fan out to all linked devices so every device receives the message.
+        std::vector<std::string> devices;
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
-            // Prefer one-time prekey for forward secrecy; fall back to identity key.
-            send_line(fd, "GETPREKEY " + recipient_id);
+            send_line(fd, "GETLINKED " + recipient_id);
             std::string resp = read_line(fd);
-            if (resp.size() > 3 && resp.substr(0, 3) == "OK ") {
+            if (resp.size() >= 3 && resp.substr(0, 3) == "OK ") {
                 std::istringstream ss(resp.substr(3));
-                std::string id_pub_hex, pk_id_or_none, pk_pub_hex;
-                ss >> id_pub_hex >> pk_id_or_none >> pk_pub_hex;
-                if (pk_id_or_none == "NONE") {
-                    encrypt_pub = Botan::hex_decode(id_pub_hex);
-                } else {
-                    encrypt_pub = Botan::hex_decode(pk_pub_hex);
-                    prekey_id = pk_id_or_none;
-                }
-            } else {
-                return; // recipient not found
+                std::string dev;
+                while (ss >> dev)
+                    devices.push_back(dev);
             }
         }
-        blob = encrypt_message(text, identity.user_id, username_local, encrypt_pub, rng, g_cfg);
-        {
-            std::lock_guard<std::mutex> lock(socket_mutex);
-            send_line(fd, "SEND " + identity.user_id + " " + session_token + " " + recipient_id +
-                              " " + prekey_id + " " + Botan::hex_encode(blob));
-            read_line(fd);
-        }
+        for (const auto& dev : devices)
+            send_to_one(fd, dev, text);
     } catch (...) {
     }
     sent_at.store(now_unix());
@@ -646,12 +663,15 @@ int main(int argc, char* argv[])
     // Optional flags
     std::string config_path = "zerotrace.conf";
     bool do_rekey = false;
+    std::string link_primary; // --link-device <primary_id>
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--config" && i + 1 < argc)
             config_path = argv[++i];
         else if (a == "--rekey")
             do_rekey = true;
+        else if (a == "--link-device" && i + 1 < argc)
+            link_primary = argv[++i];
     }
     try {
         g_cfg = Config::load(config_path);
@@ -760,6 +780,25 @@ int main(int argc, char* argv[])
         for (auto& pk : new_prekeys)
             prekey_store[pk.prekey_id] = std::move(pk);
         save_prekeys_to_file();
+    }
+
+    // -------------------------------------------------------
+    // Link-device mode (--link-device <primary_id>)
+    // -------------------------------------------------------
+    // --link-device <device_id>: this client IS the primary; link a new device to us.
+    if (!link_primary.empty()) {
+        std::string resp;
+        {
+            std::lock_guard<std::mutex> lock(socket_mutex);
+            send_line(fd,
+                      "LINK_DEVICE " + identity.user_id + " " + session_token + " " + link_primary);
+            resp = read_line(fd);
+        }
+        if (resp.substr(0, 3) == "OK") {
+            std::cout << "Device " << link_primary << " linked to this identity.\n";
+        } else {
+            std::cerr << "Failed to link device: " << resp << "\n";
+        }
     }
 
     // -------------------------------------------------------

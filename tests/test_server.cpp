@@ -1598,6 +1598,117 @@ int main()
         close(fd);
     }
 
+    // -------------------------------------------------------
+    // Multi-device (LINK_DEVICE / UNLINK_DEVICE / GETLINKED)
+    // -------------------------------------------------------
+
+    TEST("LINK_DEVICE links two identities; GETLINKED returns the device");
+    {
+        reset_server_state();
+        auto primary = generate_identity(rng, g_cfg);
+        auto device = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string p_tok = extract_token(
+            cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
+        cmd(fd, "REGISTER " + device.user_id + " " + Botan::hex_encode(device.pubkey_bytes));
+
+        std::string link_resp =
+            cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
+        ASSERT_EQ(link_resp, std::string("OK"));
+
+        std::string gl_resp = cmd(fd, "GETLINKED " + primary.user_id);
+        ASSERT_TRUE(gl_resp.find(device.user_id) != std::string::npos);
+        close(fd);
+    }
+
+    TEST("UNLINK_DEVICE removes the device from GETLINKED");
+    {
+        reset_server_state();
+        auto primary = generate_identity(rng, g_cfg);
+        auto device = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string p_tok = extract_token(
+            cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
+        cmd(fd, "REGISTER " + device.user_id + " " + Botan::hex_encode(device.pubkey_bytes));
+        cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
+
+        std::string unlink_resp =
+            cmd(fd, "UNLINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
+        ASSERT_EQ(unlink_resp, std::string("OK"));
+
+        std::string gl_resp = cmd(fd, "GETLINKED " + primary.user_id);
+        ASSERT_TRUE(gl_resp.find(device.user_id) == std::string::npos);
+        close(fd);
+    }
+
+    TEST("LINK_DEVICE rejects invalid token");
+    {
+        reset_server_state();
+        auto primary = generate_identity(rng, g_cfg);
+        auto device = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes));
+        cmd(fd, "REGISTER " + device.user_id + " " + Botan::hex_encode(device.pubkey_bytes));
+        std::string resp = cmd(fd, "LINK_DEVICE " + primary.user_id + " " + std::string(64, '0') +
+                                       " " + device.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("LINK_DEVICE rejects unregistered device");
+    {
+        reset_server_state();
+        auto primary = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string p_tok = extract_token(
+            cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("LINK_DEVICE rejects self-link");
+    {
+        reset_server_state();
+        auto primary = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string p_tok = extract_token(
+            cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + primary.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("GETLINKED returns ERR for unknown user");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        std::string resp = cmd(fd, "GETLINKED 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("DEREGISTER removes all device links");
+    {
+        reset_server_state();
+        auto primary = generate_identity(rng, g_cfg);
+        auto device = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string p_tok = extract_token(
+            cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
+        std::string d_tok = extract_token(
+            cmd(fd, "REGISTER " + device.user_id + " " + Botan::hex_encode(device.pubkey_bytes)));
+        cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
+        cmd(fd, "DEREGISTER " + primary.user_id + " " + p_tok);
+
+        // Device is still registered but link is gone
+        std::string gl_resp = cmd(fd, "GETLINKED " + device.user_id);
+        ASSERT_TRUE(gl_resp.find(primary.user_id) == std::string::npos);
+        close(fd);
+    }
+
     TEST("ensure_server_cert: cert and key files are created on first start");
     {
         // The cert-gen server deleted its cert files before starting,

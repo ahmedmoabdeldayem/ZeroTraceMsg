@@ -33,6 +33,8 @@ struct Config {
     int max_prekeys_per_user = 100;
     // Number of prekeys a client generates and uploads per batch.
     int prekey_batch_size = 20;
+    // Maximum devices a primary identity can link. 0 = unlimited.
+    int max_devices_per_user = 5;
 
     // ── [client] ────────────────────────────────────────────────────────
     std::string client_server = "127.0.0.1";
