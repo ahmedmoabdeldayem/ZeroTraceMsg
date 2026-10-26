@@ -429,6 +429,87 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             sl("OK");
             LOG_INFO("[DEREGISTER] user=" + user_id + " — all data removed");
 
+        } else if (cmd == "REKEY") {
+            // Atomic key rotation: validate old identity, register new keypair,
+            // migrate inbox, then delete the old identity.
+            std::string old_user_id, old_token, new_user_id, new_pubkey_hex;
+            ss >> old_user_id >> old_token >> new_user_id >> new_pubkey_hex;
+
+            if (old_user_id.empty() || old_token.empty() || new_user_id.empty() ||
+                new_pubkey_hex.empty()) {
+                sl("ERR missing arguments");
+                continue;
+            }
+
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(old_user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == old_token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(old_token.data()), sess->token.size());
+
+            if (token_ok && cfg.session_ttl_hours > 0) {
+                int64_t age_h = (now_unix() - sess->created_at) / 3600;
+                if (age_h >= cfg.session_ttl_hours) {
+                    s.remove_session(old_user_id);
+                    token_ok = false;
+                }
+            }
+
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+
+            try {
+                auto new_pubkey = Botan::hex_decode(new_pubkey_hex);
+
+                if (new_pubkey.size() != cfg.kem_pubkey_len()) {
+                    sl("ERR pubkey size mismatch for configured KEM");
+                    continue;
+                }
+
+                std::string derived_id = derive_user_id(new_pubkey);
+                if (derived_id != new_user_id) {
+                    sl("ERR new user_id does not match new pubkey");
+                    continue;
+                }
+
+                if (new_user_id == old_user_id) {
+                    sl("ERR cannot rekey to the same identity");
+                    continue;
+                }
+
+                auto existing = s.get_pubkey(new_user_id);
+                if (existing.has_value() && *existing != new_pubkey) {
+                    sl("ERR new user_id already registered with a different key");
+                    continue;
+                }
+
+                // Issue a new session token for the new identity.
+                std::string new_token = Botan::hex_encode(rng.random_vec(32));
+
+                s.put_user(new_user_id, new_pubkey);
+                s.put_session(new_user_id, new_token, now_unix());
+                s.migrate_inbox(old_user_id, new_user_id);
+
+                // Carry over any pending delivery acks the old identity had earned.
+                int old_acks = s.drain_ack(old_user_id);
+                if (old_acks > 0)
+                    s.increment_ack(new_user_id, old_acks);
+
+                s.remove_user(old_user_id);
+                s.remove_session(old_user_id);
+                s.remove_rate_bucket(old_user_id);
+
+                sl("OK " + new_token);
+                LOG_INFO("[REKEY]    old=" + old_user_id + " new=" + new_user_id);
+            } catch (...) {
+                sl("ERR invalid pubkey");
+            }
+
         } else {
             sl("ERR unknown command");
         }
