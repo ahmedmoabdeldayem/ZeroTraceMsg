@@ -20,6 +20,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sstream>
 #include <string>
@@ -255,23 +256,35 @@ class ClientTlsPolicy : public Botan::TLS::Policy
 
 static int connect_to_server(const std::string& ip)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    // Use getaddrinfo so both IPv4 and IPv6 addresses (and hostnames) work.
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%d", g_cfg.client_port);
+    struct addrinfo* res = nullptr;
+    if (getaddrinfo(ip.c_str(), port_str, &hints, &res) != 0 || res == nullptr)
+        return -1;
 
-    // Connection timeout via SO_RCVTIMEO / SO_SNDTIMEO
     struct timeval tv;
     tv.tv_sec = g_cfg.connection_timeout_s;
     tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(g_cfg.client_port));
-    inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
-    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+    int fd = -1;
+    for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0)
+            continue;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0)
+            break;
         close(fd);
-        return -1;
+        fd = -1;
     }
+    freeaddrinfo(res);
+    if (fd < 0)
+        return -1;
 
     // Establish TLS over the connected socket
     auto rng = std::make_shared<Botan::AutoSeeded_RNG>();

@@ -819,12 +819,36 @@ static void cleanup_thread(const Config& cfg)
 
 static int make_listening_socket(int port, const std::string& bind_addr)
 {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("socket");
-        return -1;
-    }
     int opt = 1;
+
+    // Use IPv6 dual-stack when the bind address is explicitly an IPv6 address.
+    // "0.0.0.0" stays IPv4-only; "::" or any address containing ':' requests
+    // dual-stack (accepts both IPv4 and IPv6 connections on one socket).
+    bool want_v6 = (bind_addr == "::" || bind_addr.find(':') != std::string::npos);
+    if (want_v6) {
+        int fd = socket(AF_INET6, SOCK_STREAM, 0);
+        if (fd >= 0) {
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            int v6only = 0; // dual-stack: accept IPv4-mapped addresses too
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+            sockaddr_in6 addr6{};
+            addr6.sin6_family = AF_INET6;
+            addr6.sin6_port = htons(static_cast<uint16_t>(port));
+            if (bind_addr == "::") {
+                addr6.sin6_addr = in6addr_any;
+            } else {
+                inet_pton(AF_INET6, bind_addr.c_str(), &addr6.sin6_addr);
+            }
+            if (bind(fd, reinterpret_cast<sockaddr*>(&addr6), sizeof(addr6)) == 0) {
+                listen(fd, SOMAXCONN);
+                return fd;
+            }
+            close(fd);
+        }
+    }
+
+    // IPv4 path (used for 0.0.0.0 or when IPv6 bind failed)
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
