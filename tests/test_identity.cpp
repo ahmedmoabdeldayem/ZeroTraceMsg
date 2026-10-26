@@ -316,5 +316,25 @@ int main()
         ASSERT_EQ(loaded.size(), (size_t)0);
     }
 
+    TEST("generate_prekeys / save_prekeys / load_prekeys round-trip with hybrid KEM");
+    {
+        // Exercises the priv_key2 branches in generate/save/load.
+        Config hybrid_cfg;
+        hybrid_cfg.kem = "HYBRID-X25519-ML-KEM-768";
+        const std::string path = "/tmp/ztm_test_prekeys_hybrid.tmp";
+        auto pks = generate_prekeys(2, rng, hybrid_cfg);
+        ASSERT_EQ(pks.size(), (size_t)2);
+        for (auto& pk : pks)
+            ASSERT_TRUE(pk.priv_key2 != nullptr);
+        save_prekeys(pks, path);
+        auto loaded = load_prekeys(path, hybrid_cfg);
+        ASSERT_EQ(loaded.size(), (size_t)2);
+        for (auto& pk : pks) {
+            ASSERT_TRUE(loaded.count(pk.prekey_id) == 1);
+            ASSERT_EQ(loaded[pk.prekey_id].pubkey_bytes, pk.pubkey_bytes);
+        }
+        std::remove(path.c_str());
+    }
+
     SUITE_RESULTS();
 }
