@@ -97,6 +97,23 @@ class Store
     // Returns current pending ACK count and resets it to zero.
     int drain_ack(const std::string& user_id);
 
+    // ── groups ────────────────────────────────────────────────────────────────
+    // Create a group owned by owner_id; group_id must be unique.
+    void create_group(const std::string& group_id, const std::string& owner_id,
+                      const std::string& name);
+    bool group_exists(const std::string& group_id);
+    std::string group_owner(const std::string& group_id); // "" if not found
+    std::string group_name(const std::string& group_id);
+    void delete_group(const std::string& group_id);
+    // Membership
+    void add_member(const std::string& group_id, const std::string& user_id);
+    void remove_member(const std::string& group_id, const std::string& user_id);
+    bool is_member(const std::string& group_id, const std::string& user_id);
+    std::vector<std::string> list_members(const std::string& group_id);
+    int member_count(const std::string& group_id);
+    // Remove all groups owned by user_id and memberships where user_id is a member.
+    void remove_user_from_all_groups(const std::string& user_id);
+
     // ── linked devices ────────────────────────────────────────────────────────
     // Link device_id to primary_id so messages reach both inboxes.
     void link_device(const std::string& primary_id, const std::string& device_id);

@@ -432,5 +432,71 @@ int main()
         ASSERT_EQ(s.device_count("primary000001"), 1);
     }
 
+    // ── groups ────────────────────────────────────────────────────────────────
+
+    TEST("create_group / group_exists / group_owner / group_name");
+    {
+        Store s("");
+        ASSERT_TRUE(!s.group_exists("grp0000000001234"));
+        s.create_group("grp0000000001234", "owner000000001", "TestGroup");
+        ASSERT_TRUE(s.group_exists("grp0000000001234"));
+        ASSERT_EQ(s.group_owner("grp0000000001234"), std::string("owner000000001"));
+        ASSERT_EQ(s.group_name("grp0000000001234"), std::string("TestGroup"));
+    }
+
+    TEST("add_member / is_member / list_members / member_count");
+    {
+        Store s("");
+        s.create_group("grp0000000001234", "owner000000001", "G");
+        s.add_member("grp0000000001234", "owner000000001");
+        s.add_member("grp0000000001234", "member00000001");
+        ASSERT_TRUE(s.is_member("grp0000000001234", "owner000000001"));
+        ASSERT_TRUE(s.is_member("grp0000000001234", "member00000001"));
+        ASSERT_TRUE(!s.is_member("grp0000000001234", "nobody00000001"));
+        ASSERT_EQ(s.member_count("grp0000000001234"), 2);
+        ASSERT_EQ(s.list_members("grp0000000001234").size(), (size_t)2);
+    }
+
+    TEST("remove_member removes one member");
+    {
+        Store s("");
+        s.create_group("grp0000000001234", "owner000000001", "G");
+        s.add_member("grp0000000001234", "owner000000001");
+        s.add_member("grp0000000001234", "member00000001");
+        s.remove_member("grp0000000001234", "member00000001");
+        ASSERT_TRUE(!s.is_member("grp0000000001234", "member00000001"));
+        ASSERT_EQ(s.member_count("grp0000000001234"), 1);
+    }
+
+    TEST("delete_group removes group and all members");
+    {
+        Store s("");
+        s.create_group("grp0000000001234", "owner000000001", "G");
+        s.add_member("grp0000000001234", "owner000000001");
+        s.delete_group("grp0000000001234");
+        ASSERT_TRUE(!s.group_exists("grp0000000001234"));
+        ASSERT_EQ(s.member_count("grp0000000001234"), 0);
+    }
+
+    TEST("remove_user_from_all_groups deletes owned groups and removes memberships");
+    {
+        Store s("");
+        s.create_group("grp0000000001234", "owner000000001", "G1");
+        s.add_member("grp0000000001234", "owner000000001");
+        s.add_member("grp0000000001234", "member00000001");
+        s.create_group("grp0000000009999", "other000000001", "G2");
+        s.add_member("grp0000000009999", "other000000001");
+        s.add_member("grp0000000009999", "member00000001");
+        s.remove_user_from_all_groups("owner000000001");
+        // Group G1 owned by owner000000001 is deleted
+        ASSERT_TRUE(!s.group_exists("grp0000000001234"));
+        // member00000001 is removed from G2 (where it was just a member, not owner) — no,
+        // remove_user_from_all_groups only removes memberships for the user, not others.
+        // member00000001 should still be in G2.
+        ASSERT_TRUE(s.is_member("grp0000000009999", "member00000001"));
+        // owner000000001 is no longer in anything (group was deleted)
+        ASSERT_TRUE(!s.is_member("grp0000000001234", "owner000000001"));
+    }
+
     SUITE_RESULTS();
 }

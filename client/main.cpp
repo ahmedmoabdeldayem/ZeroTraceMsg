@@ -877,6 +877,75 @@ int main(int argc, char* argv[])
             if (id.size() == USER_ID_LEN && !nick.empty()) {
                 add_contact(id, nick);
             }
+        } else if (first == "/group") {
+            // /group create <name>
+            // /group add <group_id> <user_id>
+            // /group remove <group_id> <user_id>
+            // /group members <group_id>
+            // /group send <group_id> <message>
+            std::string sub;
+            ss >> sub;
+            if (sub == "create") {
+                std::string gname;
+                std::getline(ss >> std::ws, gname);
+                if (gname.empty()) {
+                    std::cout << "\n[usage: /group create <name>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd, "CREATE_GROUP " + identity.user_id + " " + session_token + " " +
+                                      gname);
+                    std::string resp = read_line(fd);
+                    if (resp.substr(0, 3) == "OK ")
+                        std::cout << "\n[Group created: " << resp.substr(3) << "]\n";
+                    else
+                        std::cout << "\n[" << resp << "]\n";
+                }
+            } else if (sub == "add") {
+                std::string gid, uid;
+                ss >> gid >> uid;
+                std::lock_guard<std::mutex> lock(socket_mutex);
+                send_line(fd, "ADD_MEMBER " + gid + " " + identity.user_id + " " + session_token +
+                                  " " + uid);
+                std::cout << "\n[" << read_line(fd) << "]\n";
+            } else if (sub == "remove") {
+                std::string gid, uid;
+                ss >> gid >> uid;
+                std::lock_guard<std::mutex> lock(socket_mutex);
+                send_line(fd, "REMOVE_MEMBER " + gid + " " + identity.user_id + " " +
+                                  session_token + " " + uid);
+                std::cout << "\n[" << read_line(fd) << "]\n";
+            } else if (sub == "members") {
+                std::string gid;
+                ss >> gid;
+                std::lock_guard<std::mutex> lock(socket_mutex);
+                send_line(fd, "LIST_MEMBERS " + gid);
+                std::cout << "\n[" << read_line(fd) << "]\n";
+            } else if (sub == "send") {
+                std::string gid, text;
+                ss >> gid;
+                std::getline(ss >> std::ws, text);
+                if (gid.empty() || text.empty()) {
+                    std::cout << "\n[usage: /group send <group_id> <message>]\n";
+                } else {
+                    // Fetch members and send to each
+                    std::vector<std::string> members;
+                    {
+                        std::lock_guard<std::mutex> lock(socket_mutex);
+                        send_line(fd, "LIST_MEMBERS " + gid);
+                        std::string resp = read_line(fd);
+                        if (resp.size() >= 3 && resp.substr(0, 3) == "OK ") {
+                            std::istringstream mss(resp.substr(3));
+                            std::string m;
+                            while (mss >> m)
+                                members.push_back(m);
+                        }
+                    }
+                    for (const auto& m : members)
+                        if (m != identity.user_id)
+                            send_to_one(fd, m, text);
+                    sent_at.store(now_unix());
+                }
+            }
         } else {
             // <id or nickname> [message]
             // If no message follows, enter multi-line mode: type lines, then "." to send.
