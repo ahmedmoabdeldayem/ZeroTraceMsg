@@ -390,5 +390,47 @@ int main()
         ASSERT_EQ(msgs[0].prekey_id, std::string("aabbccdd11223344"));
     }
 
+    // ── linked devices ────────────────────────────────────────────────────────
+
+    TEST("link_device / get_linked_devices / device_count round-trip");
+    {
+        Store s("");
+        ASSERT_EQ(s.device_count("primary000001"), 0);
+        s.link_device("primary000001", "device0000001");
+        s.link_device("primary000001", "device0000002");
+        ASSERT_EQ(s.device_count("primary000001"), 2);
+        auto devices = s.get_linked_devices("primary000001");
+        ASSERT_EQ(devices.size(), (size_t)2);
+    }
+
+    TEST("unlink_device removes the specific link");
+    {
+        Store s("");
+        s.link_device("primary000001", "device0000001");
+        s.link_device("primary000001", "device0000002");
+        s.unlink_device("primary000001", "device0000001");
+        ASSERT_EQ(s.device_count("primary000001"), 1);
+        auto devices = s.get_linked_devices("primary000001");
+        ASSERT_EQ(devices[0], std::string("device0000002"));
+    }
+
+    TEST("remove_all_links clears both primary and device roles");
+    {
+        Store s("");
+        s.link_device("primary000001", "device0000001");
+        s.link_device("primary000002", "device0000001");
+        s.remove_all_links("device0000001");
+        ASSERT_EQ(s.get_linked_devices("primary000001").size(), (size_t)0);
+        ASSERT_EQ(s.get_linked_devices("primary000002").size(), (size_t)0);
+    }
+
+    TEST("link_device is idempotent (INSERT OR IGNORE)");
+    {
+        Store s("");
+        s.link_device("primary000001", "device0000001");
+        s.link_device("primary000001", "device0000001");
+        ASSERT_EQ(s.device_count("primary000001"), 1);
+    }
+
     SUITE_RESULTS();
 }

@@ -97,6 +97,16 @@ class Store
     // Returns current pending ACK count and resets it to zero.
     int drain_ack(const std::string& user_id);
 
+    // ── linked devices ────────────────────────────────────────────────────────
+    // Link device_id to primary_id so messages reach both inboxes.
+    void link_device(const std::string& primary_id, const std::string& device_id);
+    void unlink_device(const std::string& primary_id, const std::string& device_id);
+    // Returns all device_ids linked to primary_id (does not include primary_id itself).
+    std::vector<std::string> get_linked_devices(const std::string& primary_id);
+    int device_count(const std::string& primary_id);
+    // Remove all links where user_id is primary or device (called on DEREGISTER/REKEY).
+    void remove_all_links(const std::string& user_id);
+
     // ── bulk ──────────────────────────────────────────────────────────────────
     void clear_all();
 

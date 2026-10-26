@@ -85,6 +85,14 @@ Store::Store(const std::string& path)
          "  uploaded_at INTEGER NOT NULL"
          ")");
     exec("CREATE INDEX IF NOT EXISTS idx_prekeys_user ON prekeys(user_id)");
+    exec("CREATE TABLE IF NOT EXISTS linked_devices ("
+         "  primary_id TEXT NOT NULL,"
+         "  device_id  TEXT NOT NULL,"
+         "  linked_at  INTEGER NOT NULL,"
+         "  PRIMARY KEY (primary_id, device_id)"
+         ")");
+    exec("CREATE INDEX IF NOT EXISTS idx_linked_primary ON linked_devices(primary_id)");
+    exec("CREATE INDEX IF NOT EXISTS idx_linked_device ON linked_devices(device_id)");
 }
 
 Store::~Store() { sqlite3_close(db_); }
@@ -528,6 +536,66 @@ int Store::prekey_count(const std::string& user_id)
     return sqlite3_column_int(st.s, 0);
 }
 
+// ── linked devices ────────────────────────────────────────────────────────────
+
+void Store::link_device(const std::string& primary_id, const std::string& device_id)
+{
+    int64_t now = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                           std::chrono::system_clock::now().time_since_epoch())
+                                           .count());
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "INSERT OR IGNORE INTO linked_devices(primary_id, device_id, linked_at) VALUES(?,?,?)",
+        -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, primary_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, device_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_int64(st.s, 3, now));
+    check(sqlite3_step(st.s));
+}
+
+void Store::unlink_device(const std::string& primary_id, const std::string& device_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "DELETE FROM linked_devices WHERE primary_id=? AND device_id=?",
+                             -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, primary_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, device_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
+std::vector<std::string> Store::get_linked_devices(const std::string& primary_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "SELECT device_id FROM linked_devices WHERE primary_id=? ORDER BY linked_at ASC", -1,
+        &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, primary_id.c_str(), -1, SQLITE_STATIC));
+    std::vector<std::string> devices;
+    while (sqlite3_step(st.s) == SQLITE_ROW)
+        devices.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
+    return devices;
+}
+
+int Store::device_count(const std::string& primary_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM linked_devices WHERE primary_id=?", -1,
+                             &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, primary_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+    return sqlite3_column_int(st.s, 0);
+}
+
+void Store::remove_all_links(const std::string& user_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "DELETE FROM linked_devices WHERE primary_id=? OR device_id=?",
+                             -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, user_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, user_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
 // ── bulk ─────────────────────────────────────────────────────────────────────
 
 void Store::clear_all()
@@ -538,4 +606,5 @@ void Store::clear_all()
     exec("DELETE FROM rate_buckets");
     exec("DELETE FROM delivery_acks");
     exec("DELETE FROM prekeys");
+    exec("DELETE FROM linked_devices");
 }

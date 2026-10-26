@@ -318,6 +318,76 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                          " count=" + std::to_string(rows.size()));
             }
 
+        } else if (cmd == "GETLINKED") {
+            // Returns all device_ids linked to a primary identity, space-separated.
+            // Response: OK [device1 device2 ...]  (empty list returns "OK")
+            std::string user_id;
+            ss >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.user_exists(user_id)) {
+                sl("ERR unknown user");
+            } else {
+                auto devices = s.get_linked_devices(user_id);
+                std::string resp = "OK";
+                for (const auto& d : devices)
+                    resp += " " + d;
+                sl(resp);
+            }
+
+        } else if (cmd == "LINK_DEVICE") {
+            // LINK_DEVICE <primary_id> <primary_token> <device_id>
+            std::string primary_id, token, device_id;
+            ss >> primary_id >> token >> device_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(primary_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            if (!s.user_exists(device_id)) {
+                sl("ERR device not registered");
+                continue;
+            }
+            if (device_id == primary_id) {
+                sl("ERR cannot link device to itself");
+                continue;
+            }
+            if (cfg.max_devices_per_user > 0 &&
+                s.device_count(primary_id) >= cfg.max_devices_per_user) {
+                sl("ERR device limit reached");
+                continue;
+            }
+            s.link_device(primary_id, device_id);
+            sl("OK");
+            LOG_INFO("[LINK_DEVICE] primary=" + primary_id + " device=" + device_id);
+
+        } else if (cmd == "UNLINK_DEVICE") {
+            // UNLINK_DEVICE <primary_id> <primary_token> <device_id>
+            std::string primary_id, token, device_id;
+            ss >> primary_id >> token >> device_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(primary_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            s.unlink_device(primary_id, device_id);
+            sl("OK");
+            LOG_INFO("[UNLINK_DEVICE] primary=" + primary_id + " device=" + device_id);
+
         } else if (cmd == "SEND") {
             std::string sender_id, token, recipient_id, prekey_id, blob_hex;
             ss >> sender_id >> token >> recipient_id >> prekey_id >> blob_hex;
@@ -506,9 +576,9 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             s.remove_user(user_id);
             s.remove_session(user_id);
             s.remove_rate_bucket(user_id);
-            // drain_inbox implicitly deletes messages; delivery_acks reset on drain
             s.drain_inbox(user_id);
             s.drain_ack(user_id);
+            s.remove_all_links(user_id);
             sl("OK");
             LOG_INFO("[DEREGISTER] user=" + user_id + " — all data removed");
 
@@ -582,6 +652,11 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 int old_acks = s.drain_ack(old_user_id);
                 if (old_acks > 0)
                     s.increment_ack(new_user_id, old_acks);
+
+                // Migrate device links to the new identity.
+                for (const auto& dev : s.get_linked_devices(old_user_id))
+                    s.link_device(new_user_id, dev);
+                s.remove_all_links(old_user_id);
 
                 s.remove_user(old_user_id);
                 s.remove_session(old_user_id);
