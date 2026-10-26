@@ -40,6 +40,8 @@ static const int TEST_METRICS_PORT = 59988;
 static const int TEST_PREKEY_CAP_PORT = 59987;
 // TLS server bound to :: (dual-stack) for IPv6 connectivity tests
 static const int TEST_IPV6_PORT = 59986;
+// TLS server bound to ::1 (IPv6 loopback) for specific-address inet_pton coverage
+static const int TEST_IPV6_LOOPBACK_PORT = 59985;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -354,6 +356,17 @@ int main()
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_ipv6.cert.pem";
         cfg.key_path = "/tmp/ztm_ipv6.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // TLS server bound to ::1 (IPv6 loopback) — covers the inet_pton path for specific addresses
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_IPV6_LOOPBACK_PORT;
+        cfg.server_bind = "::1";
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_ipv6lb.cert.pem";
+        cfg.key_path = "/tmp/ztm_ipv6lb.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));

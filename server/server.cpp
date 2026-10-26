@@ -821,10 +821,10 @@ static int make_listening_socket(int port, const std::string& bind_addr)
 {
     int opt = 1;
 
-    // Attempt dual-stack IPv6 (accepts both IPv4 and IPv6 connections).
-    // Falls back to IPv4-only if the OS does not support AF_INET6.
-    bool want_v6 =
-        (bind_addr == "0.0.0.0" || bind_addr == "::" || bind_addr.find(':') != std::string::npos);
+    // Use IPv6 dual-stack when the bind address is explicitly an IPv6 address.
+    // "0.0.0.0" stays IPv4-only; "::" or any address containing ':' requests
+    // dual-stack (accepts both IPv4 and IPv6 connections on one socket).
+    bool want_v6 = (bind_addr == "::" || bind_addr.find(':') != std::string::npos);
     if (want_v6) {
         int fd = socket(AF_INET6, SOCK_STREAM, 0);
         if (fd >= 0) {
@@ -834,7 +834,7 @@ static int make_listening_socket(int port, const std::string& bind_addr)
             sockaddr_in6 addr6{};
             addr6.sin6_family = AF_INET6;
             addr6.sin6_port = htons(static_cast<uint16_t>(port));
-            if (bind_addr == "0.0.0.0" || bind_addr == "::") {
+            if (bind_addr == "::") {
                 addr6.sin6_addr = in6addr_any;
             } else {
                 inet_pton(AF_INET6, bind_addr.c_str(), &addr6.sin6_addr);
@@ -847,12 +847,8 @@ static int make_listening_socket(int port, const std::string& bind_addr)
         }
     }
 
-    // IPv4 fallback
+    // IPv4 path (used for 0.0.0.0 or when IPv6 bind failed)
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        perror("socket");
-        return -1;
-    }
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
