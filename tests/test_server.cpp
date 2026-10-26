@@ -1356,9 +1356,8 @@ int main()
         // Pre-register new_id so get_pubkey(new_user_id) returns a value
         cmd(fd, "REGISTER " + new_id.user_id + " " + Botan::hex_encode(new_id.pubkey_bytes));
 
-        std::string resp =
-            cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id + " " +
-                        Botan::hex_encode(new_id.pubkey_bytes));
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id + " " +
+                                       Botan::hex_encode(new_id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
 
         close(fd);
@@ -1409,8 +1408,8 @@ int main()
             cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
         auto new_id = generate_identity(rng, g_cfg);
         // Pass a non-hex string as the pubkey to trigger the catch(…) path
-        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id +
-                                       " ZZZZZZZZZZZZZZZZ");
+        std::string resp =
+            cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id + " ZZZZZZZZZZZZZZZZ");
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
 
         close(fd);
