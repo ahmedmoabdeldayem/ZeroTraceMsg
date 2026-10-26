@@ -29,6 +29,10 @@ struct Config {
     int admin_port = 9998;
     // Prometheus metrics HTTP port (0.0.0.0). 0 = disabled.
     int metrics_port = 9997;
+    // Maximum one-time prekeys stored per user on the server. 0 = unlimited.
+    int max_prekeys_per_user = 100;
+    // Number of prekeys a client generates and uploads per batch.
+    int prekey_batch_size = 20;
 
     // ── [client] ────────────────────────────────────────────────────────
     std::string client_server = "127.0.0.1";
