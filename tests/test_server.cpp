@@ -36,6 +36,8 @@ static const int TEST_ADMIN_PORT = 59990;
 // TLS server with metrics port enabled
 static const int TEST_METRICS_TLS_PORT = 59989;
 static const int TEST_METRICS_PORT = 59988;
+// Plain TCP server with max_prekeys_per_user=1 (covers prekey store full path)
+static const int TEST_PREKEY_CAP_PORT = 59987;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -328,6 +330,17 @@ int main()
         cfg.metrics_port = TEST_METRICS_PORT;
         cfg.cert_path = "/tmp/ztm_metrics.cert.pem";
         cfg.key_path = "/tmp/ztm_metrics.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // TLS server with max_prekeys_per_user=1 (covers prekey store full path)
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_PREKEY_CAP_PORT;
+        cfg.max_prekeys_per_user = 1;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_prekey_cap.cert.pem";
+        cfg.key_path = "/tmp/ztm_prekey_cap.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -1482,6 +1495,65 @@ int main()
                                        " " + Botan::hex_encode(pk[0].pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects no prekeys provided");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp = cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects pubkey with wrong size");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Send 16 bytes (way too short for any KEM)
+        std::string resp = cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                                       Botan::hex_encode(std::vector<uint8_t>(16, 0xAB)));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects invalid hex");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " ZZZZZZZZZZZZZZZZ");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects when prekey store is full");
+    {
+        // Uses the prekey-cap TLS server which has max_prekeys_per_user=1
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_PREKEY_CAP_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string tok = extract_token(
+            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        auto pks = generate_prekeys(2, rng, g_cfg);
+        // First upload fills the store (cap=1)
+        tls_cmd(conn, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                          Botan::hex_encode(pks[0].pubkey_bytes));
+        // Second upload must be rejected
+        std::string resp = tls_cmd(conn, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                                             Botan::hex_encode(pks[1].pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(conn.fd);
     }
 
     TEST("SEND with prekey_id stores it and POLL returns it");
