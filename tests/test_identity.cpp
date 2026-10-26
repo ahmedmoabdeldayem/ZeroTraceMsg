@@ -280,5 +280,41 @@ int main()
         ASSERT_TRUE(k1 != k2);
     }
 
+    // ── prekeys ───────────────────────────────────────────────────────────────
+
+    TEST("generate_prekeys produces the requested count with unique IDs");
+    {
+        auto pks = generate_prekeys(5, rng, cfg);
+        ASSERT_EQ(pks.size(), (size_t)5);
+        for (auto& pk : pks) {
+            ASSERT_TRUE(!pk.prekey_id.empty());
+            ASSERT_TRUE(!pk.pubkey_bytes.empty());
+            ASSERT_TRUE(pk.priv_key != nullptr);
+            ASSERT_EQ(pk.prekey_id, derive_user_id(pk.pubkey_bytes));
+        }
+    }
+
+    TEST("save_prekeys / load_prekeys round-trip");
+    {
+        const std::string path = "/tmp/ztm_test_prekeys.tmp";
+        auto pks = generate_prekeys(3, rng, cfg);
+        save_prekeys(pks, path);
+
+        auto loaded = load_prekeys(path, cfg);
+        ASSERT_EQ(loaded.size(), (size_t)3);
+        for (auto& pk : pks) {
+            ASSERT_TRUE(loaded.count(pk.prekey_id) == 1);
+            auto& lk = loaded[pk.prekey_id];
+            ASSERT_EQ(lk.pubkey_bytes, pk.pubkey_bytes);
+        }
+        std::remove(path.c_str());
+    }
+
+    TEST("load_prekeys returns empty map for missing file");
+    {
+        auto loaded = load_prekeys("/tmp/ztm_no_such_prekeys.tmp", cfg);
+        ASSERT_EQ(loaded.size(), (size_t)0);
+    }
+
     SUITE_RESULTS();
 }
