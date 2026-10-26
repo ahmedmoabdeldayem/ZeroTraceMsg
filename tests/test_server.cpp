@@ -1805,6 +1805,59 @@ int main()
         close(fd);
     }
 
+    TEST("CREATE_GROUP rejects empty group name");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Send CREATE_GROUP with no name (trailing whitespace only)
+        std::string resp = cmd(fd, "CREATE_GROUP " + id.user_id + " " + tok);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("ADD_MEMBER rejects unknown group");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "ADD_MEMBER 0000000000000000 " + id.user_id + " " + tok + " " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("ADD_MEMBER rejects unknown user");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + tok + " G").substr(3);
+        std::string resp =
+            cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + tok + " 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REMOVE_MEMBER rejects unknown group");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "REMOVE_MEMBER 0000000000000000 " + id.user_id + " " + tok + " " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
     TEST("ensure_server_cert: cert and key files are created on first start");
     {
         // The cert-gen server deleted its cert files before starting,
