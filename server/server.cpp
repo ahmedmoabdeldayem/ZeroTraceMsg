@@ -241,9 +241,92 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 sl("OK " + Botan::hex_encode(*key));
             }
 
+        } else if (cmd == "GETPREKEY") {
+            // Returns the user's identity pubkey and one popped one-time prekey (if available).
+            // Response: OK <identity_pubkey_hex> <prekey_id> <prekey_pubkey_hex>
+            //       or: OK <identity_pubkey_hex> NONE
+            //       or: ERR unknown user
+            std::string user_id;
+            ss >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            auto key = s.get_pubkey(user_id);
+            if (!key.has_value()) {
+                sl("ERR unknown user");
+            } else {
+                auto prekey = s.pop_prekey(user_id);
+                if (prekey.has_value()) {
+                    sl("OK " + Botan::hex_encode(*key) + " " + prekey->prekey_id + " " +
+                       Botan::hex_encode(prekey->pubkey));
+                } else {
+                    sl("OK " + Botan::hex_encode(*key) + " NONE");
+                }
+            }
+
+        } else if (cmd == "UPLOAD_PREKEYS") {
+            // UPLOAD_PREKEYS <user_id> <token> <pk1_hex> [<pk2_hex> ...]
+            // Stores one-time prekey public keys for the authenticated user.
+            std::string user_id, token;
+            ss >> user_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+
+            if (cfg.max_prekeys_per_user > 0 &&
+                s.prekey_count(user_id) >= cfg.max_prekeys_per_user) {
+                sl("ERR prekey store full");
+                continue;
+            }
+
+            {
+                std::vector<Store::PrekeyRow> rows;
+                bool parse_ok = true;
+                std::string pk_hex;
+                while (ss >> pk_hex) {
+                    try {
+                        auto pk_bytes = Botan::hex_decode(pk_hex);
+                        if (pk_bytes.size() != cfg.kem_pubkey_len()) {
+                            sl("ERR pubkey size mismatch");
+                            parse_ok = false;
+                            break;
+                        }
+                        rows.push_back({derive_user_id(pk_bytes), std::move(pk_bytes)});
+                    } catch (...) {
+                        sl("ERR invalid pubkey hex");
+                        parse_ok = false;
+                        break;
+                    }
+                }
+                if (!parse_ok)
+                    continue;
+                if (rows.empty()) {
+                    sl("ERR no prekeys provided");
+                    continue;
+                }
+                s.put_prekeys(user_id, rows);
+                sl("OK " + std::to_string(rows.size()));
+                LOG_INFO("[UPLOAD_PREKEYS] user=" + user_id +
+                         " count=" + std::to_string(rows.size()));
+            }
+
         } else if (cmd == "SEND") {
-            std::string sender_id, token, recipient_id, blob_hex;
-            ss >> sender_id >> token >> recipient_id >> blob_hex;
+            std::string sender_id, token, recipient_id, prekey_id, blob_hex;
+            ss >> sender_id >> token >> recipient_id >> prekey_id >> blob_hex;
+            // Backward-compat: if blob_hex is empty the caller sent the old 4-arg form
+            // (no prekey_id field); treat the 4th token as the blob and default prekey to _.
+            if (blob_hex.empty()) {
+                blob_hex = prekey_id;
+                prekey_id = "_";
+            }
             std::lock_guard<std::mutex> lock(store_mutex);
             Store& s = get_store();
 
@@ -306,7 +389,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                     continue;
                 }
                 std::string msg_id = new_message_id();
-                s.enqueue(msg_id, recipient_id, sender_id, blob, now_unix());
+                s.enqueue(msg_id, recipient_id, sender_id, blob, prekey_id, now_unix());
                 g_messages_sent_total.fetch_add(1);
                 sl("OK");
                 LOG_INFO("[SEND]     to=" + recipient_id + " msg_id=" + msg_id + " blob=" +
@@ -347,7 +430,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             auto msgs = s.peek_inbox(user_id, now_unix());
             if (!msgs.empty()) {
                 for (auto& msg : msgs)
-                    sl("MSG " + msg.id + " " + Botan::hex_encode(msg.blob));
+                    sl("MSG " + msg.id + " " + msg.prekey_id + " " + Botan::hex_encode(msg.blob));
                 LOG_INFO("[POLL]     user=" + user_id + " -> sent " + std::to_string(msgs.size()) +
                          " message(s) (awaiting MSGACK)");
             }

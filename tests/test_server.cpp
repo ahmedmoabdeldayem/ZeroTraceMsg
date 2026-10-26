@@ -36,6 +36,8 @@ static const int TEST_ADMIN_PORT = 59990;
 // TLS server with metrics port enabled
 static const int TEST_METRICS_TLS_PORT = 59989;
 static const int TEST_METRICS_PORT = 59988;
+// Plain TCP server with max_prekeys_per_user=1 (covers prekey store full path)
+static const int TEST_PREKEY_CAP_PORT = 59987;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -211,8 +213,8 @@ static std::vector<std::vector<uint8_t>> poll_all(int fd, const std::string& use
             break;
         if (line.substr(0, 4) == "MSG ") {
             std::istringstream ss(line.substr(4));
-            std::string msg_id, blob_hex;
-            ss >> msg_id >> blob_hex;
+            std::string msg_id, prekey_id, blob_hex;
+            ss >> msg_id >> prekey_id >> blob_hex;
             ids.push_back(msg_id);
             blobs.push_back(Botan::hex_decode(blob_hex));
         }
@@ -328,6 +330,17 @@ int main()
         cfg.metrics_port = TEST_METRICS_PORT;
         cfg.cert_path = "/tmp/ztm_metrics.cert.pem";
         cfg.key_path = "/tmp/ztm_metrics.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // TLS server with max_prekeys_per_user=1 (covers prekey store full path)
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_PREKEY_CAP_PORT;
+        cfg.max_prekeys_per_user = 1;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_prekey_cap.cert.pem";
+        cfg.key_path = "/tmp/ztm_prekey_cap.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -1412,6 +1425,176 @@ int main()
             cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id + " ZZZZZZZZZZZZZZZZ");
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
 
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Prekeys (UPLOAD_PREKEYS / GETPREKEY)
+    // -------------------------------------------------------
+
+    TEST("UPLOAD_PREKEYS stores prekeys and GETPREKEY pops one");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+
+        // Generate a prekey pair and upload it
+        auto prekeys = generate_prekeys(1, rng, g_cfg);
+        std::string upload_resp = cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                                              Botan::hex_encode(prekeys[0].pubkey_bytes));
+        ASSERT_TRUE(upload_resp.substr(0, 3) == "OK ");
+
+        // GETPREKEY should return identity pubkey + prekey
+        std::string gp_resp = cmd(fd, "GETPREKEY " + id.user_id);
+        ASSERT_TRUE(gp_resp.substr(0, 3) == "OK ");
+        std::istringstream gp_ss(gp_resp.substr(3));
+        std::string id_pub, pk_id, pk_pub;
+        gp_ss >> id_pub >> pk_id >> pk_pub;
+        ASSERT_EQ(id_pub, Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_EQ(pk_id, prekeys[0].prekey_id);
+        ASSERT_TRUE(!pk_pub.empty());
+
+        // Second GETPREKEY — no more prekeys, should return NONE
+        std::string gp2 = cmd(fd, "GETPREKEY " + id.user_id);
+        ASSERT_TRUE(gp2.find("NONE") != std::string::npos);
+
+        close(fd);
+    }
+
+    TEST("GETPREKEY falls back to NONE when no prekeys uploaded");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = cmd(fd, "GETPREKEY " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        ASSERT_TRUE(resp.find("NONE") != std::string::npos);
+        close(fd);
+    }
+
+    TEST("GETPREKEY returns ERR for unknown user");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        std::string resp = cmd(fd, "GETPREKEY 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        auto pk = generate_prekeys(1, rng, g_cfg);
+        std::string resp = cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + std::string(64, '0') +
+                                       " " + Botan::hex_encode(pk[0].pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects no prekeys provided");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp = cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects pubkey with wrong size");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Send 16 bytes (way too short for any KEM)
+        std::string resp = cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                                       Botan::hex_encode(std::vector<uint8_t>(16, 0xAB)));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects invalid hex");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " ZZZZZZZZZZZZZZZZ");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("UPLOAD_PREKEYS rejects when prekey store is full");
+    {
+        // Uses the prekey-cap TLS server which has max_prekeys_per_user=1
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_PREKEY_CAP_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        std::string tok = extract_token(
+            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        auto pks = generate_prekeys(2, rng, g_cfg);
+        // First upload fills the store (cap=1)
+        tls_cmd(conn, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                          Botan::hex_encode(pks[0].pubkey_bytes));
+        // Second upload must be rejected
+        std::string resp = tls_cmd(conn, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                                             Botan::hex_encode(pks[1].pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(conn.fd);
+    }
+
+    TEST("SEND with prekey_id stores it and POLL returns it");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recip = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(
+            cmd(fd, "REGISTER " + recip.user_id + " " + Botan::hex_encode(recip.pubkey_bytes)));
+
+        // Upload a prekey for recipient
+        auto pks = generate_prekeys(1, rng, g_cfg);
+        cmd(fd, "UPLOAD_PREKEYS " + recip.user_id + " " + r_tok + " " +
+                    Botan::hex_encode(pks[0].pubkey_bytes));
+
+        // Send using the prekey
+        auto blob = encrypt_message("hi", sender.user_id, "s", pks[0].pubkey_bytes, rng, g_cfg);
+        std::string send_resp =
+            cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recip.user_id + " " +
+                        pks[0].prekey_id + " " + Botan::hex_encode(blob));
+        ASSERT_EQ(send_resp, std::string("OK"));
+
+        // POLL should include the prekey_id in the MSG line
+        send_line(fd, "POLL " + recip.user_id + " " + r_tok);
+        std::string msg_line = read_line(fd);
+        ASSERT_TRUE(msg_line.substr(0, 4) == "MSG ");
+        std::istringstream mss(msg_line.substr(4));
+        std::string msg_id, msg_pk_id, msg_blob_hex;
+        mss >> msg_id >> msg_pk_id >> msg_blob_hex;
+        ASSERT_EQ(msg_pk_id, pks[0].prekey_id);
+
+        // Decrypt using the prekey private key
+        auto msg_blob = Botan::hex_decode(msg_blob_hex);
+        auto dec = decrypt_message(msg_blob, *pks[0].priv_key, pks[0].priv_key2.get(),
+                                   pks[0].pubkey_bytes, rng, g_cfg);
+        ASSERT_EQ(dec.plaintext, std::string("hi"));
+        read_line(fd); // NOMSG
+        cmd(fd, "MSGACK " + recip.user_id + " " + r_tok + " " + msg_id);
         close(fd);
     }
 

@@ -9,6 +9,7 @@
 #include <botan/pwdhash.h>
 #include <fstream>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 
 std::string derive_user_id(const std::vector<uint8_t>& pubkey_bytes)
@@ -164,4 +165,77 @@ Botan::secure_vector<uint8_t> derive_contacts_key(const Identity& id, const Conf
     static const std::vector<uint8_t> info{'Z', 'T', 'M', '-', 'c', 'o', 'n', 't',
                                            'a', 'c', 't', 's', '-', 'v', '1'};
     return hkdf_exp->derive_key(32, prk, std::vector<uint8_t>{}, info);
+}
+
+// ── prekey generation and storage ────────────────────────────────────────────
+
+std::vector<PrekeyPair> generate_prekeys(int n, Botan::AutoSeeded_RNG& rng, const Config& cfg)
+{
+    std::vector<PrekeyPair> out;
+    out.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        PrekeyPair pk;
+        pk.priv_key = make_kem_key(rng, cfg);
+        pk.priv_key2 = make_kem_key2(rng, cfg);
+        pk.pubkey_bytes = kem_pubkey_bytes(*pk.priv_key);
+        if (pk.priv_key2) {
+            auto pub2 = kem_pubkey_bytes(*pk.priv_key2);
+            pk.pubkey_bytes.insert(pk.pubkey_bytes.end(), pub2.begin(), pub2.end());
+        }
+        pk.prekey_id = derive_user_id(pk.pubkey_bytes);
+        out.push_back(std::move(pk));
+    }
+    return out;
+}
+
+void save_prekeys(const std::vector<PrekeyPair>& prekeys, const std::string& path)
+{
+    std::ofstream out(path, std::ios::trunc);
+    if (!out)
+        throw std::runtime_error("Cannot write prekeys file: " + path);
+    for (const auto& pk : prekeys) {
+        auto raw = pk.priv_key->raw_private_key_bits();
+        out << pk.prekey_id << " " << Botan::hex_encode(raw);
+        if (pk.priv_key2) {
+            auto raw2 = pk.priv_key2->raw_private_key_bits();
+            out << " " << Botan::hex_encode(raw2);
+        }
+        out << "\n";
+    }
+}
+
+std::map<std::string, PrekeyPair> load_prekeys(const std::string& path, const Config& cfg)
+{
+    std::map<std::string, PrekeyPair> result;
+    std::ifstream in(path);
+    if (!in)
+        return result; // file not found → empty map (first run before upload)
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty())
+            continue;
+        std::istringstream ss(line);
+        std::string prekey_id, hex1, hex2;
+        ss >> prekey_id >> hex1;
+        ss >> hex2;
+
+        PrekeyPair pk;
+        pk.prekey_id = prekey_id;
+        auto raw1 = Botan::hex_decode(hex1);
+        pk.priv_key = kem_key_from_bytes(std::span<const uint8_t>(raw1.data(), raw1.size()), cfg,
+                                         /*secondary=*/false);
+        if (!hex2.empty()) {
+            auto raw2 = Botan::hex_decode(hex2);
+            pk.priv_key2 =
+                kem_key_from_bytes(std::span<const uint8_t>(raw2.data(), raw2.size()), cfg,
+                                   /*secondary=*/true);
+        }
+        pk.pubkey_bytes = kem_pubkey_bytes(*pk.priv_key);
+        if (pk.priv_key2) {
+            auto pub2 = kem_pubkey_bytes(*pk.priv_key2);
+            pk.pubkey_bytes.insert(pk.pubkey_bytes.end(), pub2.begin(), pub2.end());
+        }
+        result[prekey_id] = std::move(pk);
+    }
+    return result;
 }

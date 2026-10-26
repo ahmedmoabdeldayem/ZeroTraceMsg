@@ -40,14 +40,27 @@ class Store
     int session_count();
     void prune_sessions(int64_t min_created_at);
 
+    // ── prekeys ───────────────────────────────────────────────────────────────
+    struct PrekeyRow {
+        std::string prekey_id; // hex(SHA-256(pubkey)[0:8])
+        std::vector<uint8_t> pubkey;
+    };
+    // Store a batch of one-time prekeys for a user (server-side public keys only).
+    void put_prekeys(const std::string& user_id, const std::vector<PrekeyRow>& prekeys);
+    // Atomically pop (return + delete) one prekey for user; returns nullopt if none available.
+    std::optional<PrekeyRow> pop_prekey(const std::string& user_id);
+    int prekey_count(const std::string& user_id);
+
     // ── messages ──────────────────────────────────────────────────────────────
     struct MessageRow {
         std::string id;
         std::string sender_id;
+        std::string prekey_id; // "_" when encrypted to identity key
         std::vector<uint8_t> blob;
     };
     void enqueue(const std::string& msg_id, const std::string& recipient_id,
-                 const std::string& sender_id, const std::vector<uint8_t>& blob, int64_t ts);
+                 const std::string& sender_id, const std::vector<uint8_t>& blob,
+                 const std::string& prekey_id, int64_t ts);
     int inbox_size(const std::string& recipient_id);
     // Phase 1: return pending messages and mark them in-flight (not yet deleted).
     std::vector<MessageRow> peek_inbox(const std::string& recipient_id, int64_t now);

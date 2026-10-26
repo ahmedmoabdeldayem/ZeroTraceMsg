@@ -1,4 +1,5 @@
 #include "store.hpp"
+#include <chrono>
 #include <sqlite3.h>
 #include <stdexcept>
 #include <string>
@@ -58,11 +59,14 @@ Store::Store(const std::string& path)
          "  in_flight_at INTEGER DEFAULT NULL"
          ")");
     exec("CREATE INDEX IF NOT EXISTS idx_messages_recipient ON messages(recipient_id)");
-    // Schema migration: add in_flight_at to databases created before this column existed.
+    // Schema migrations: add columns that didn't exist in earlier schema versions.
     try {
         exec("ALTER TABLE messages ADD COLUMN in_flight_at INTEGER DEFAULT NULL");
     } catch (...) {
-        // Column already present — ignore.
+    }
+    try {
+        exec("ALTER TABLE messages ADD COLUMN prekey_id TEXT NOT NULL DEFAULT '_'");
+    } catch (...) {
     }
     exec("CREATE TABLE IF NOT EXISTS rate_buckets ("
          "  user_id      TEXT PRIMARY KEY,"
@@ -74,6 +78,13 @@ Store::Store(const std::string& path)
          "  user_id TEXT PRIMARY KEY,"
          "  count   INTEGER NOT NULL DEFAULT 0"
          ")");
+    exec("CREATE TABLE IF NOT EXISTS prekeys ("
+         "  prekey_id   TEXT PRIMARY KEY,"
+         "  user_id     TEXT NOT NULL,"
+         "  pubkey      BLOB NOT NULL,"
+         "  uploaded_at INTEGER NOT NULL"
+         ")");
+    exec("CREATE INDEX IF NOT EXISTS idx_prekeys_user ON prekeys(user_id)");
 }
 
 Store::~Store() { sqlite3_close(db_); }
@@ -192,17 +203,21 @@ void Store::prune_sessions(int64_t min_created_at)
 // ── messages ──────────────────────────────────────────────────────────────────
 
 void Store::enqueue(const std::string& msg_id, const std::string& recipient_id,
-                    const std::string& sender_id, const std::vector<uint8_t>& blob, int64_t ts)
+                    const std::string& sender_id, const std::vector<uint8_t>& blob,
+                    const std::string& prekey_id, int64_t ts)
 {
     Stmt st;
     check(sqlite3_prepare_v2(
-        db_, "INSERT INTO messages(id, recipient_id, sender_id, blob, timestamp) VALUES(?,?,?,?,?)",
+        db_,
+        "INSERT INTO messages(id, recipient_id, sender_id, blob, prekey_id, timestamp)"
+        " VALUES(?,?,?,?,?,?)",
         -1, &st.s, nullptr));
     check(sqlite3_bind_text(st.s, 1, msg_id.c_str(), -1, SQLITE_STATIC));
     check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
     check(sqlite3_bind_text(st.s, 3, sender_id.c_str(), -1, SQLITE_STATIC));
     check(sqlite3_bind_blob(st.s, 4, blob.data(), static_cast<int>(blob.size()), SQLITE_STATIC));
-    check(sqlite3_bind_int64(st.s, 5, ts));
+    check(sqlite3_bind_text(st.s, 5, prekey_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_int64(st.s, 6, ts));
     check(sqlite3_step(st.s));
 }
 
@@ -223,17 +238,18 @@ std::vector<Store::MessageRow> Store::drain_inbox(const std::string& recipient_i
 
     {
         Stmt st;
-        check(sqlite3_prepare_v2(
-            db_,
-            "SELECT id, sender_id, blob FROM messages WHERE recipient_id=? ORDER BY timestamp ASC",
-            -1, &st.s, nullptr));
+        check(sqlite3_prepare_v2(db_,
+                                 "SELECT id, sender_id, prekey_id, blob FROM messages"
+                                 " WHERE recipient_id=? ORDER BY timestamp ASC",
+                                 -1, &st.s, nullptr));
         check(sqlite3_bind_text(st.s, 1, recipient_id.c_str(), -1, SQLITE_STATIC));
         while (sqlite3_step(st.s) == SQLITE_ROW) {
             MessageRow row;
             row.id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
             row.sender_id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 1));
-            const void* raw = sqlite3_column_blob(st.s, 2);
-            int len = sqlite3_column_bytes(st.s, 2);
+            row.prekey_id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 2));
+            const void* raw = sqlite3_column_blob(st.s, 3);
+            int len = sqlite3_column_bytes(st.s, 3);
             row.blob.assign(static_cast<const uint8_t*>(raw),
                             static_cast<const uint8_t*>(raw) + len);
             rows.push_back(std::move(row));
@@ -261,7 +277,7 @@ std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id
         Stmt st;
         check(sqlite3_prepare_v2(
             db_,
-            "SELECT id, sender_id, blob FROM messages"
+            "SELECT id, sender_id, prekey_id, blob FROM messages"
             " WHERE recipient_id=? AND in_flight_at IS NULL ORDER BY timestamp ASC",
             -1, &st.s, nullptr));
         check(sqlite3_bind_text(st.s, 1, recipient_id.c_str(), -1, SQLITE_STATIC));
@@ -269,8 +285,9 @@ std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id
             MessageRow row;
             row.id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
             row.sender_id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 1));
-            const void* raw = sqlite3_column_blob(st.s, 2);
-            int len = sqlite3_column_bytes(st.s, 2);
+            row.prekey_id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 2));
+            const void* raw = sqlite3_column_blob(st.s, 3);
+            int len = sqlite3_column_bytes(st.s, 3);
             row.blob.assign(static_cast<const uint8_t*>(raw),
                             static_cast<const uint8_t*>(raw) + len);
             rows.push_back(std::move(row));
@@ -444,6 +461,73 @@ int Store::drain_ack(const std::string& user_id)
     return count;
 }
 
+// ── prekeys ───────────────────────────────────────────────────────────────────
+
+void Store::put_prekeys(const std::string& user_id, const std::vector<PrekeyRow>& prekeys)
+{
+    int64_t now = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                           std::chrono::system_clock::now().time_since_epoch())
+                                           .count());
+    for (const auto& pk : prekeys) {
+        Stmt st;
+        check(sqlite3_prepare_v2(
+            db_,
+            "INSERT OR IGNORE INTO prekeys(prekey_id, user_id, pubkey, uploaded_at)"
+            " VALUES(?,?,?,?)",
+            -1, &st.s, nullptr));
+        check(sqlite3_bind_text(st.s, 1, pk.prekey_id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_bind_text(st.s, 2, user_id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_bind_blob(st.s, 3, pk.pubkey.data(), static_cast<int>(pk.pubkey.size()),
+                                SQLITE_STATIC));
+        check(sqlite3_bind_int64(st.s, 4, now));
+        check(sqlite3_step(st.s));
+    }
+}
+
+std::optional<Store::PrekeyRow> Store::pop_prekey(const std::string& user_id)
+{
+    exec("BEGIN");
+    std::optional<PrekeyRow> result;
+
+    {
+        Stmt st;
+        check(sqlite3_prepare_v2(db_,
+                                 "SELECT prekey_id, pubkey FROM prekeys WHERE user_id=? ORDER BY "
+                                 "uploaded_at ASC LIMIT 1",
+                                 -1, &st.s, nullptr));
+        check(sqlite3_bind_text(st.s, 1, user_id.c_str(), -1, SQLITE_STATIC));
+        if (sqlite3_step(st.s) == SQLITE_ROW) {
+            PrekeyRow row;
+            row.prekey_id = reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
+            const void* raw = sqlite3_column_blob(st.s, 1);
+            int len = sqlite3_column_bytes(st.s, 1);
+            row.pubkey.assign(static_cast<const uint8_t*>(raw),
+                              static_cast<const uint8_t*>(raw) + len);
+            result = std::move(row);
+        }
+    }
+
+    if (result.has_value()) {
+        Stmt st;
+        check(sqlite3_prepare_v2(db_, "DELETE FROM prekeys WHERE prekey_id=?", -1, &st.s, nullptr));
+        check(sqlite3_bind_text(st.s, 1, result->prekey_id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_step(st.s));
+    }
+
+    exec("COMMIT");
+    return result;
+}
+
+int Store::prekey_count(const std::string& user_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM prekeys WHERE user_id=?", -1, &st.s,
+                             nullptr));
+    check(sqlite3_bind_text(st.s, 1, user_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+    return sqlite3_column_int(st.s, 0);
+}
+
 // ── bulk ─────────────────────────────────────────────────────────────────────
 
 void Store::clear_all()
@@ -453,4 +537,5 @@ void Store::clear_all()
     exec("DELETE FROM messages");
     exec("DELETE FROM rate_buckets");
     exec("DELETE FROM delivery_acks");
+    exec("DELETE FROM prekeys");
 }

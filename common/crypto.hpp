@@ -21,6 +21,16 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
                                      const std::vector<uint8_t>& recipient_pubkey,
                                      Botan::AutoSeeded_RNG& rng, const Config& cfg);
 
-// Decrypt a blob using the recipient's identity and the deployment config.
-DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identity& id,
+// Decrypt a blob using raw key components (used for both identity and prekey decryption).
+DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
+                                 const Botan::Private_Key& priv_key,
+                                 const Botan::Private_Key* priv_key2,
+                                 const std::vector<uint8_t>& pubkey_bytes,
                                  Botan::AutoSeeded_RNG& rng, const Config& cfg);
+
+// Convenience overload: decrypt using the recipient's full identity.
+inline DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identity& id,
+                                        Botan::AutoSeeded_RNG& rng, const Config& cfg)
+{
+    return decrypt_message(blob, *id.priv_key, id.priv_key2.get(), id.pubkey_bytes, rng, cfg);
+}

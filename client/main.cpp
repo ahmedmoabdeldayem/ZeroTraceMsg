@@ -107,6 +107,8 @@ static Identity identity;
 static std::atomic<int> sock_fd{-1};
 static std::string username_local;                      // chosen username, sealed in messages
 static std::string session_token;                       // issued by server on REGISTER
+static std::map<std::string, PrekeyPair> prekey_store;  // prekey_id → private key pair
+static std::string prekeys_file;                        // path to persisted prekey private keys
 static std::atomic<int64_t> sent_at{0};                 // timestamp of last send
 static std::atomic<int64_t> delivered_at{0};            // timestamp of last delivery confirmation
 static std::mutex socket_mutex;                         // serializes all socket send/recv
@@ -117,6 +119,30 @@ static Botan::secure_vector<uint8_t>
     g_contacts_key;            // derived from identity, used to encrypt contacts
 static std::string g_pin_file; // TOFU cert pin file path
 static ReplayGuard replay_guard;
+
+static void save_prekeys_to_file()
+{
+    if (prekeys_file.empty())
+        return;
+    std::vector<PrekeyPair*> ptrs;
+    for (auto& [id, pk] : prekey_store)
+        ptrs.push_back(&pk);
+    // Rebuild vector for save_prekeys (it takes const vector<PrekeyPair>&)
+    // Re-use save_prekeys by building a temporary non-owning view isn't possible;
+    // write directly instead.
+    std::ofstream out(prekeys_file, std::ios::trunc);
+    if (!out)
+        return;
+    for (auto& [pk_id, pk] : prekey_store) {
+        auto raw = pk.priv_key->raw_private_key_bits();
+        out << pk_id << " " << Botan::hex_encode(raw);
+        if (pk.priv_key2) {
+            auto raw2 = pk.priv_key2->raw_private_key_bits();
+            out << " " << Botan::hex_encode(raw2);
+        }
+        out << "\n";
+    }
+}
 
 // -------------------------------------------------------
 // Contacts — persisted to users/<username>.contacts
@@ -346,41 +372,42 @@ static bool do_register(int fd)
 }
 
 // -------------------------------------------------------
-// Fetch recipient's public key from server
-// -------------------------------------------------------
-// caller must hold socket_mutex
-static std::vector<uint8_t> get_pubkey_locked(int fd, const std::string& user_id)
-{
-    send_line(fd, "GETKEY " + user_id);
-    std::string resp = read_line(fd);
-    if (resp.substr(0, 3) != "OK ")
-        throw std::runtime_error("User not found: " + user_id);
-    return Botan::hex_decode(resp.substr(3));
-}
-
 // -------------------------------------------------------
 // Send an encrypted message to recipient
 // -------------------------------------------------------
 static void do_send(int fd, const std::string& recipient_id, const std::string& text)
 {
     try {
-        std::vector<uint8_t> recipient_pub;
+        std::vector<uint8_t> encrypt_pub;
+        std::string prekey_id = "_";
         std::vector<uint8_t> blob;
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
-            recipient_pub = get_pubkey_locked(fd, recipient_id);
+            // Prefer one-time prekey for forward secrecy; fall back to identity key.
+            send_line(fd, "GETPREKEY " + recipient_id);
+            std::string resp = read_line(fd);
+            if (resp.size() > 3 && resp.substr(0, 3) == "OK ") {
+                std::istringstream ss(resp.substr(3));
+                std::string id_pub_hex, pk_id_or_none, pk_pub_hex;
+                ss >> id_pub_hex >> pk_id_or_none >> pk_pub_hex;
+                if (pk_id_or_none == "NONE") {
+                    encrypt_pub = Botan::hex_decode(id_pub_hex);
+                } else {
+                    encrypt_pub = Botan::hex_decode(pk_pub_hex);
+                    prekey_id = pk_id_or_none;
+                }
+            } else {
+                return; // recipient not found
+            }
         }
-        // encrypt outside the lock — can be slow, no need to hold socket
-        blob = encrypt_message(text, identity.user_id, username_local, recipient_pub, rng, g_cfg);
+        blob = encrypt_message(text, identity.user_id, username_local, encrypt_pub, rng, g_cfg);
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
-            // include sender_id + token so server can authenticate the send
             send_line(fd, "SEND " + identity.user_id + " " + session_token + " " + recipient_id +
-                              " " + Botan::hex_encode(blob));
-            read_line(fd); // consume server response
+                              " " + prekey_id + " " + Botan::hex_encode(blob));
+            read_line(fd);
         }
     } catch (...) {
-        // intentionally silent — revealing failure details leaks whether recipient exists
     }
     sent_at.store(now_unix());
 }
@@ -480,10 +507,11 @@ static void poll_thread(std::string server_ip)
                     delivered_at.store(now_unix());
                 } else if (line.substr(0, 4) == "MSG ") {
                     std::istringstream ss(line.substr(4));
-                    std::string msg_id;
-                    ss >> msg_id;
+                    std::string msg_id, pk_id;
+                    ss >> msg_id >> pk_id;
                     msg_ids.push_back(msg_id);
                     received_lines.push_back(line);
+                    (void)pk_id;
                 }
             }
             // Phase 2: confirm receipt so the server deletes the messages.
@@ -503,12 +531,26 @@ static void poll_thread(std::string server_ip)
 
             if (line.substr(0, 4) == "MSG ") {
                 std::istringstream ss(line.substr(4));
-                std::string msg_id, blob_hex;
-                ss >> msg_id >> blob_hex;
+                std::string msg_id, msg_prekey_id, blob_hex;
+                ss >> msg_id >> msg_prekey_id >> blob_hex;
 
                 try {
                     auto blob = Botan::hex_decode(blob_hex);
-                    auto decrypted = decrypt_message(blob, identity, rng, g_cfg);
+                    DecryptedMessage decrypted;
+                    if (msg_prekey_id != "_") {
+                        auto it = prekey_store.find(msg_prekey_id);
+                        if (it != prekey_store.end()) {
+                            auto& pk = it->second;
+                            decrypted = decrypt_message(blob, *pk.priv_key, pk.priv_key2.get(),
+                                                        pk.pubkey_bytes, rng, g_cfg);
+                            prekey_store.erase(it);
+                            save_prekeys_to_file();
+                        } else {
+                            continue; // prekey not found — skip undecryptable message
+                        }
+                    } else {
+                        decrypted = decrypt_message(blob, identity, rng, g_cfg);
+                    }
 
                     if (!replay_guard.check_and_insert(decrypted.msg_nonce))
                         continue; // duplicate nonce — silently drop replay
@@ -633,12 +675,26 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // Rebuild username from the allowlist so the path it produces is demonstrably
+    // free of separators — allowlist reconstruction is the pattern CodeQL recognises
+    // as a path-injection sanitizer.
+    std::string safe_username;
+    safe_username.reserve(username.size());
+    for (char c : username)
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
+            safe_username += c;
+    if (safe_username.empty() || safe_username != username) {
+        std::cerr << "Username contains invalid characters.\n";
+        return 1;
+    }
+    username = safe_username;
     username_local = username;
 
     // store identity in users/<username>.enc
     // store contacts in users/<username>.contacts (AES-256-GCM encrypted)
     std::string identity_file = "users/" + username + ".enc";
     contacts_file = "users/" + username + ".contacts";
+    prekeys_file = "users/" + username + ".prekeys";
     g_pin_file = "users/.server_pin";
 
     // create users/ with restricted permissions — contains encrypted private keys
@@ -670,6 +726,9 @@ int main(int argc, char* argv[])
     // Derive contacts encryption key from the private key (deterministic, no extra passphrase)
     g_contacts_key = derive_contacts_key(identity, g_cfg);
 
+    // Load any previously-generated prekey private keys from disk.
+    prekey_store = load_prekeys(prekeys_file, g_cfg);
+
     // -------------------------------------------------------
     // Connect and register
     // -------------------------------------------------------
@@ -688,6 +747,19 @@ int main(int argc, char* argv[])
     if (!do_register(fd)) {
         std::cerr << "Registration failed.\n";
         return 1;
+    }
+
+    // Generate and upload a fresh batch of one-time prekeys for forward secrecy.
+    {
+        auto new_prekeys = generate_prekeys(g_cfg.prekey_batch_size, rng, g_cfg);
+        std::string upload_cmd = "UPLOAD_PREKEYS " + identity.user_id + " " + session_token;
+        for (auto& pk : new_prekeys)
+            upload_cmd += " " + Botan::hex_encode(pk.pubkey_bytes);
+        send_line(fd, upload_cmd);
+        read_line(fd); // consume OK / ERR
+        for (auto& pk : new_prekeys)
+            prekey_store[pk.prekey_id] = std::move(pk);
+        save_prekeys_to_file();
     }
 
     // -------------------------------------------------------

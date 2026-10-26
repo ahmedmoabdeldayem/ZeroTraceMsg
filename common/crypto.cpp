@@ -73,7 +73,10 @@ std::vector<uint8_t> encrypt_message(const std::string& plaintext, const std::st
     return blob;
 }
 
-DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identity& id,
+DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob,
+                                 const Botan::Private_Key& priv_key,
+                                 const Botan::Private_Key* priv_key2,
+                                 const std::vector<uint8_t>& pubkey_bytes,
                                  Botan::AutoSeeded_RNG& rng, const Config& cfg)
 {
     size_t expected = cfg.max_blob_len();
@@ -86,7 +89,7 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
     Botan::secure_vector<uint8_t> ciphertext(blob.begin() + kem_len, blob.end());
 
     // Step 1 — KEM decapsulation
-    auto shared_secret = kem_decapsulate(kem_ct, *id.priv_key, id.priv_key2.get(), rng, cfg);
+    auto shared_secret = kem_decapsulate(kem_ct, priv_key, priv_key2, rng, cfg);
 
     // Step 2 — HKDF (same derivation as encrypt)
     std::string hkdf_extract = "HKDF-Extract(" + cfg.botan_hash() + ")";
@@ -96,7 +99,7 @@ DecryptedMessage decrypt_message(const std::vector<uint8_t>& blob, const Identit
     auto hkdf_exp = Botan::KDF::create_or_throw(hkdf_expand);
 
     std::vector<uint8_t> hkdf_salt(kem_ct.begin(), kem_ct.end());
-    hkdf_salt.insert(hkdf_salt.end(), id.pubkey_bytes.begin(), id.pubkey_bytes.end());
+    hkdf_salt.insert(hkdf_salt.end(), pubkey_bytes.begin(), pubkey_bytes.end());
     Botan::secure_vector<uint8_t> prk =
         hkdf_ext->derive_key(32, shared_secret, hkdf_salt, std::vector<uint8_t>{});
 
