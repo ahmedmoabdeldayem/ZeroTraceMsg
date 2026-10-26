@@ -675,16 +675,20 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    username_local = username;
-
-    // Validate that the username contains no path separators or dots — the loop above
-    // already enforces this, but an explicit check here gives static-analysis tools a
-    // clear sanitization point to follow.
-    if (username.find('/') != std::string::npos || username.find('.') != std::string::npos ||
-        username.find('\\') != std::string::npos) {
+    // Rebuild username from the allowlist so the path it produces is demonstrably
+    // free of separators — allowlist reconstruction is the pattern CodeQL recognises
+    // as a path-injection sanitizer.
+    std::string safe_username;
+    safe_username.reserve(username.size());
+    for (char c : username)
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')
+            safe_username += c;
+    if (safe_username.empty() || safe_username != username) {
         std::cerr << "Username contains invalid characters.\n";
         return 1;
     }
+    username = safe_username;
+    username_local = username;
 
     // store identity in users/<username>.enc
     // store contacts in users/<username>.contacts (AES-256-GCM encrypted)
