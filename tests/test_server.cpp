@@ -1709,6 +1709,155 @@ int main()
         close(fd);
     }
 
+    // -------------------------------------------------------
+    // Group messaging (CREATE_GROUP / ADD_MEMBER / REMOVE_MEMBER / LIST_MEMBERS)
+    // -------------------------------------------------------
+
+    TEST("CREATE_GROUP creates a group and returns group_id");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string resp = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + tok + " MyGroup");
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string gid = resp.substr(3);
+        ASSERT_EQ(gid.size(), (size_t)16); // 8-byte hex = 16 chars
+        close(fd);
+    }
+
+    TEST("ADD_MEMBER adds a user; LIST_MEMBERS returns all members");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto member = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        cmd(fd, "REGISTER " + member.user_id + " " + Botan::hex_encode(member.pubkey_bytes));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+
+        std::string add_resp =
+            cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
+        ASSERT_EQ(add_resp, std::string("OK"));
+
+        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid);
+        ASSERT_TRUE(list_resp.find(member.user_id) != std::string::npos);
+        ASSERT_TRUE(list_resp.find(owner.user_id) != std::string::npos);
+        close(fd);
+    }
+
+    TEST("REMOVE_MEMBER removes a user from the group");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto member = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        cmd(fd, "REGISTER " + member.user_id + " " + Botan::hex_encode(member.pubkey_bytes));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
+
+        cmd(fd, "REMOVE_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
+        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid);
+        ASSERT_TRUE(list_resp.find(member.user_id) == std::string::npos);
+        close(fd);
+    }
+
+    TEST("ADD_MEMBER rejects non-owner");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto other = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string other_tok = extract_token(
+            cmd(fd, "REGISTER " + other.user_id + " " + Botan::hex_encode(other.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+
+        std::string resp = cmd(fd, "ADD_MEMBER " + gid + " " + other.user_id + " " + other_tok +
+                                       " " + owner.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("CREATE_GROUP rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp =
+            cmd(fd, "CREATE_GROUP " + id.user_id + " " + std::string(64, '0') + " G");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("LIST_MEMBERS returns ERR for unknown group");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        std::string resp = cmd(fd, "LIST_MEMBERS 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("CREATE_GROUP rejects empty group name");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Send CREATE_GROUP with no name (trailing whitespace only)
+        std::string resp = cmd(fd, "CREATE_GROUP " + id.user_id + " " + tok);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("ADD_MEMBER rejects unknown group");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "ADD_MEMBER 0000000000000000 " + id.user_id + " " + tok + " " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("ADD_MEMBER rejects unknown user");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + tok + " G").substr(3);
+        std::string resp =
+            cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + tok + " 0000000000000000");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REMOVE_MEMBER rejects unknown group");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "REMOVE_MEMBER 0000000000000000 " + id.user_id + " " + tok + " " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
     TEST("ensure_server_cert: cert and key files are created on first start");
     {
         // The cert-gen server deleted its cert files before starting,

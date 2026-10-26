@@ -13,6 +13,7 @@
 #include <botan/ec_group.h>
 #include <botan/ecdsa.h>
 #include <botan/ed25519.h>
+#include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/pkcs8.h>
 #include <botan/tls_session_manager_noop.h>
@@ -388,6 +389,116 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             sl("OK");
             LOG_INFO("[UNLINK_DEVICE] primary=" + primary_id + " device=" + device_id);
 
+        } else if (cmd == "CREATE_GROUP") {
+            // CREATE_GROUP <owner_id> <token> <group_name>
+            // group_id = hex(SHA-256(owner_id + timestamp)[0:8])
+            std::string owner_id, token, group_name;
+            ss >> owner_id >> token;
+            std::getline(ss, group_name);
+            // strip leading space
+            if (!group_name.empty() && group_name[0] == ' ')
+                group_name = group_name.substr(1);
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            if (group_name.empty()) {
+                sl("ERR group name required");
+                continue;
+            }
+            // Derive group_id from owner + random nonce
+            std::string nonce_hex = Botan::hex_encode(rng.random_vec(8));
+            auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+            sha->update(owner_id + nonce_hex);
+            std::string group_id = Botan::hex_encode(sha->final().data(), 8);
+
+            s.create_group(group_id, owner_id, group_name);
+            s.add_member(group_id, owner_id);
+            sl("OK " + group_id);
+            LOG_INFO("[CREATE_GROUP] owner=" + owner_id + " group=" + group_id +
+                     " name=" + group_name);
+
+        } else if (cmd == "ADD_MEMBER") {
+            // ADD_MEMBER <group_id> <owner_token_owner_id> <owner_token> <user_id>
+            // Only group owner can add members.
+            std::string group_id, owner_id, token, user_id;
+            ss >> group_id >> owner_id >> token >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok || s.group_owner(group_id) != owner_id) {
+                sl("ERR not group owner");
+                continue;
+            }
+            if (!s.user_exists(user_id)) {
+                sl("ERR unknown user");
+                continue;
+            }
+            if (cfg.max_group_members > 0 && s.member_count(group_id) >= cfg.max_group_members) {
+                sl("ERR group is full");
+                continue;
+            }
+            s.add_member(group_id, user_id);
+            sl("OK");
+            LOG_INFO("[ADD_MEMBER] group=" + group_id + " user=" + user_id);
+
+        } else if (cmd == "REMOVE_MEMBER") {
+            // REMOVE_MEMBER <group_id> <owner_id> <token> <user_id>
+            std::string group_id, owner_id, token, user_id;
+            ss >> group_id >> owner_id >> token >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok || s.group_owner(group_id) != owner_id) {
+                sl("ERR not group owner");
+                continue;
+            }
+            s.remove_member(group_id, user_id);
+            sl("OK");
+            LOG_INFO("[REMOVE_MEMBER] group=" + group_id + " user=" + user_id);
+
+        } else if (cmd == "LIST_MEMBERS") {
+            // LIST_MEMBERS <group_id>  — public, no auth required
+            std::string group_id;
+            ss >> group_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+            } else {
+                auto members = s.list_members(group_id);
+                std::string resp = "OK";
+                for (const auto& m : members)
+                    resp += " " + m;
+                sl(resp);
+            }
+
         } else if (cmd == "SEND") {
             std::string sender_id, token, recipient_id, prekey_id, blob_hex;
             ss >> sender_id >> token >> recipient_id >> prekey_id >> blob_hex;
@@ -579,6 +690,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             s.drain_inbox(user_id);
             s.drain_ack(user_id);
             s.remove_all_links(user_id);
+            s.remove_user_from_all_groups(user_id);
             sl("OK");
             LOG_INFO("[DEREGISTER] user=" + user_id + " — all data removed");
 

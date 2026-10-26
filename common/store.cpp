@@ -85,6 +85,20 @@ Store::Store(const std::string& path)
          "  uploaded_at INTEGER NOT NULL"
          ")");
     exec("CREATE INDEX IF NOT EXISTS idx_prekeys_user ON prekeys(user_id)");
+    exec("CREATE TABLE IF NOT EXISTS groups ("
+         "  group_id   TEXT PRIMARY KEY,"
+         "  owner_id   TEXT NOT NULL,"
+         "  name       TEXT NOT NULL,"
+         "  created_at INTEGER NOT NULL"
+         ")");
+    exec("CREATE TABLE IF NOT EXISTS group_members ("
+         "  group_id  TEXT NOT NULL,"
+         "  user_id   TEXT NOT NULL,"
+         "  joined_at INTEGER NOT NULL,"
+         "  PRIMARY KEY (group_id, user_id)"
+         ")");
+    exec("CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id)");
+    exec("CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id)");
     exec("CREATE TABLE IF NOT EXISTS linked_devices ("
          "  primary_id TEXT NOT NULL,"
          "  device_id  TEXT NOT NULL,"
@@ -536,6 +550,149 @@ int Store::prekey_count(const std::string& user_id)
     return sqlite3_column_int(st.s, 0);
 }
 
+// ── groups ────────────────────────────────────────────────────────────────────
+
+static int64_t now_ts()
+{
+    return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::seconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count());
+}
+
+void Store::create_group(const std::string& group_id, const std::string& owner_id,
+                         const std::string& name)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "INSERT OR IGNORE INTO groups(group_id, owner_id, name, created_at) VALUES(?,?,?,?)",
+        -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, owner_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 3, name.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_int64(st.s, 4, now_ts()));
+    check(sqlite3_step(st.s));
+}
+
+bool Store::group_exists(const std::string& group_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT 1 FROM groups WHERE group_id=?", -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    return sqlite3_step(st.s) == SQLITE_ROW;
+}
+
+std::string Store::group_owner(const std::string& group_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT owner_id FROM groups WHERE group_id=?", -1, &st.s,
+                             nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    if (sqlite3_step(st.s) != SQLITE_ROW)
+        return "";
+    return reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
+}
+
+std::string Store::group_name(const std::string& group_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT name FROM groups WHERE group_id=?", -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    if (sqlite3_step(st.s) != SQLITE_ROW)
+        return "";
+    return reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
+}
+
+void Store::delete_group(const std::string& group_id)
+{
+    {
+        Stmt st;
+        check(sqlite3_prepare_v2(db_, "DELETE FROM group_members WHERE group_id=?", -1, &st.s,
+                                 nullptr));
+        check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+        check(sqlite3_step(st.s));
+    }
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "DELETE FROM groups WHERE group_id=?", -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
+void Store::add_member(const std::string& group_id, const std::string& user_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "INSERT OR IGNORE INTO group_members(group_id, user_id, joined_at) VALUES(?,?,?)", -1,
+        &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, user_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_int64(st.s, 3, now_ts()));
+    check(sqlite3_step(st.s));
+}
+
+void Store::remove_member(const std::string& group_id, const std::string& user_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "DELETE FROM group_members WHERE group_id=? AND user_id=?", -1,
+                             &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, user_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
+bool Store::is_member(const std::string& group_id, const std::string& user_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT 1 FROM group_members WHERE group_id=? AND user_id=?", -1,
+                             &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, user_id.c_str(), -1, SQLITE_STATIC));
+    return sqlite3_step(st.s) == SQLITE_ROW;
+}
+
+std::vector<std::string> Store::list_members(const std::string& group_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "SELECT user_id FROM group_members WHERE group_id=? ORDER BY joined_at ASC", -1, &st.s,
+        nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    std::vector<std::string> members;
+    while (sqlite3_step(st.s) == SQLITE_ROW)
+        members.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
+    return members;
+}
+
+int Store::member_count(const std::string& group_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM group_members WHERE group_id=?", -1, &st.s,
+                             nullptr));
+    check(sqlite3_bind_text(st.s, 1, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+    return sqlite3_column_int(st.s, 0);
+}
+
+void Store::remove_user_from_all_groups(const std::string& user_id)
+{
+    // Delete groups owned by this user
+    {
+        Stmt st;
+        check(sqlite3_prepare_v2(db_, "SELECT group_id FROM groups WHERE owner_id=?", -1, &st.s,
+                                 nullptr));
+        check(sqlite3_bind_text(st.s, 1, user_id.c_str(), -1, SQLITE_STATIC));
+        std::vector<std::string> owned;
+        while (sqlite3_step(st.s) == SQLITE_ROW)
+            owned.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0)));
+        for (const auto& gid : owned)
+            delete_group(gid);
+    }
+    // Remove membership from all other groups
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "DELETE FROM group_members WHERE user_id=?", -1, &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, user_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
 // ── linked devices ────────────────────────────────────────────────────────────
 
 void Store::link_device(const std::string& primary_id, const std::string& device_id)
@@ -607,4 +764,6 @@ void Store::clear_all()
     exec("DELETE FROM delivery_acks");
     exec("DELETE FROM prekeys");
     exec("DELETE FROM linked_devices");
+    exec("DELETE FROM groups");
+    exec("DELETE FROM group_members");
 }
