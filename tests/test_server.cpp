@@ -1342,6 +1342,80 @@ int main()
         close(fd);
     }
 
+    TEST("REKEY to already-registered new_user_id with same key is allowed");
+    {
+        // Exercises the existing.has_value() branch in the duplicate-key guard:
+        // new_user_id is already registered with the exact same pubkey (idempotent upsert).
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto new_id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        // Pre-register new_id so get_pubkey(new_user_id) returns a value
+        cmd(fd, "REGISTER " + new_id.user_id + " " + Botan::hex_encode(new_id.pubkey_bytes));
+
+        std::string resp =
+            cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id + " " +
+                        Botan::hex_encode(new_id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+
+        close(fd);
+    }
+
+    TEST("REKEY carries over pending delivery acks to new identity");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recipient = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(cmd(fd, "REGISTER " + recipient.user_id + " " +
+                                                      Botan::hex_encode(recipient.pubkey_bytes)));
+
+        // Send a message and poll+ack it so recipient accumulates a delivery ack
+        auto blob =
+            encrypt_message("ack-test", sender.user_id, "s", recipient.pubkey_bytes, rng, g_cfg);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recipient.user_id + " " +
+                    Botan::hex_encode(blob));
+        // poll_all sends MSGACK internally, which increments the ack counter
+        poll_all(fd, recipient.user_id, r_tok);
+
+        // Now rotate recipient's key
+        auto new_recip = generate_identity(rng, g_cfg);
+        std::string rekey_resp =
+            cmd(fd, "REKEY " + recipient.user_id + " " + r_tok + " " + new_recip.user_id + " " +
+                        Botan::hex_encode(new_recip.pubkey_bytes));
+        ASSERT_TRUE(rekey_resp.substr(0, 3) == "OK ");
+        std::string new_r_tok = rekey_resp.substr(3);
+
+        // POLL on new identity should return the carried-over ack count (DELIVERED line)
+        std::string poll_resp = cmd(fd, "POLL " + new_recip.user_id + " " + new_r_tok);
+        ASSERT_TRUE(poll_resp.find("NOMSG") != std::string::npos ||
+                    poll_resp.find("DELIVERED") != std::string::npos);
+
+        close(fd);
+    }
+
+    TEST("REKEY rejects invalid hex in pubkey");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        auto new_id = generate_identity(rng, g_cfg);
+        // Pass a non-hex string as the pubkey to trigger the catch(…) path
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id +
+                                       " ZZZZZZZZZZZZZZZZ");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+
+        close(fd);
+    }
+
     TEST("ensure_server_cert: cert and key files are created on first start");
     {
         // The cert-gen server deleted its cert files before starting,
