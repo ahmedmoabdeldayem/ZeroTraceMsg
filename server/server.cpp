@@ -519,6 +519,88 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 sl(resp);
             }
 
+        } else if (cmd == "DELETE_GROUP") {
+            // DELETE_GROUP <group_id> <owner_id> <token>
+            // Only the group owner can disband the group and remove all members.
+            std::string group_id, owner_id, token;
+            ss >> group_id >> owner_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok || s.group_owner(group_id) != owner_id) {
+                sl("ERR not group owner");
+                continue;
+            }
+            s.delete_group(group_id);
+            sl("OK");
+            LOG_INFO("[DELETE_GROUP] group=" + group_id + " owner=" + owner_id);
+
+        } else if (cmd == "LEAVE_GROUP") {
+            // LEAVE_GROUP <group_id> <user_id> <token>
+            // Any member (including the owner) can leave. If the owner leaves, the group
+            // persists but has no owner — the admin must delete it.
+            std::string group_id, user_id, token;
+            ss >> group_id >> user_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            if (!s.is_member(group_id, user_id)) {
+                sl("ERR not a member");
+                continue;
+            }
+            s.remove_member(group_id, user_id);
+            sl("OK");
+            LOG_INFO("[LEAVE_GROUP] group=" + group_id + " user=" + user_id);
+
+        } else if (cmd == "TRANSFER_GROUP") {
+            // TRANSFER_GROUP <group_id> <owner_id> <token> <new_owner_id>
+            // Transfer ownership to a current member.
+            std::string group_id, owner_id, token, new_owner_id;
+            ss >> group_id >> owner_id >> token >> new_owner_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok || s.group_owner(group_id) != owner_id) {
+                sl("ERR not group owner");
+                continue;
+            }
+            if (!s.is_member(group_id, new_owner_id)) {
+                sl("ERR new owner is not a member");
+                continue;
+            }
+            s.set_group_owner(group_id, new_owner_id);
+            sl("OK");
+            LOG_INFO("[TRANSFER_GROUP] group=" + group_id + " old=" + owner_id +
+                     " new=" + new_owner_id);
+
         } else if (cmd == "SEND") {
             std::string sender_id, token, recipient_id, prekey_id, blob_hex;
             ss >> sender_id >> token >> recipient_id >> prekey_id >> blob_hex;

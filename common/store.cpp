@@ -616,6 +616,16 @@ std::string Store::group_name(const std::string& group_id)
     return reinterpret_cast<const char*>(sqlite3_column_text(st.s, 0));
 }
 
+void Store::set_group_owner(const std::string& group_id, const std::string& new_owner_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "UPDATE groups SET owner_id=? WHERE group_id=?", -1, &st.s,
+                             nullptr));
+    check(sqlite3_bind_text(st.s, 1, new_owner_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_bind_text(st.s, 2, group_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+}
+
 void Store::delete_group(const std::string& group_id)
 {
     {
