@@ -108,6 +108,7 @@ class Store
     bool group_exists(const std::string& group_id);
     std::string group_owner(const std::string& group_id); // "" if not found
     std::string group_name(const std::string& group_id);
+    void set_group_owner(const std::string& group_id, const std::string& new_owner_id);
     void delete_group(const std::string& group_id);
     // Membership
     void add_member(const std::string& group_id, const std::string& user_id);

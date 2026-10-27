@@ -990,6 +990,39 @@ int main(int argc, char* argv[])
                             send_to_one(fd, m, text);
                     sent_at.store(now_unix());
                 }
+            } else if (sub == "delete") {
+                std::string gid;
+                ss >> gid;
+                if (gid.empty()) {
+                    std::cout << "\n[usage: /group delete <group_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd,
+                              "DELETE_GROUP " + gid + " " + identity.user_id + " " + session_token);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
+            } else if (sub == "leave") {
+                std::string gid;
+                ss >> gid;
+                if (gid.empty()) {
+                    std::cout << "\n[usage: /group leave <group_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd,
+                              "LEAVE_GROUP " + gid + " " + identity.user_id + " " + session_token);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
+            } else if (sub == "transfer") {
+                std::string gid, new_owner;
+                ss >> gid >> new_owner;
+                if (gid.empty() || new_owner.empty()) {
+                    std::cout << "\n[usage: /group transfer <group_id> <new_owner_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd, "TRANSFER_GROUP " + gid + " " + identity.user_id + " " +
+                                      session_token + " " + new_owner);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
             }
         } else {
             // <id or nickname> [message]
