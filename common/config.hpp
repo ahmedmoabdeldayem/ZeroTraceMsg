@@ -37,6 +37,8 @@ struct Config {
     int max_devices_per_user = 5;
     // Worker threads in the connection pool. 0 = auto (hardware_concurrency, min 1).
     int worker_threads = 0;
+    // Upload a fresh prekey batch when server-side count falls below this threshold.
+    int prekey_refill_threshold = 5;
     // Maximum members per group. 0 = unlimited.
     int max_group_members = 50;
     // Maximum groups a user can own. 0 = unlimited.
