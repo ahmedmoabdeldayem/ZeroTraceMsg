@@ -1930,6 +1930,36 @@ int main()
         }
     }
 
+    // -------------------------------------------------------
+    // Thread pool / async I/O
+    // -------------------------------------------------------
+
+    TEST("thread pool handles concurrent connections without deadlock");
+    {
+        // Open several connections simultaneously and verify each can REGISTER.
+        // If the pool deadlocked, the test would hang; ASSERT_TRUE verifies responses.
+        reset_server_state();
+        std::vector<std::string> resps;
+        std::mutex mu;
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 4; ++i) {
+            threads.emplace_back([&] {
+                auto id = generate_identity(rng, g_cfg);
+                int fd = connect_test();
+                std::string r =
+                    cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+                close(fd);
+                std::lock_guard<std::mutex> lk(mu);
+                resps.push_back(r);
+            });
+        }
+        for (auto& t : threads)
+            t.join();
+        ASSERT_EQ(resps.size(), (size_t)4);
+        for (const auto& r : resps)
+            ASSERT_TRUE(r.substr(0, 3) == "OK ");
+    }
+
     TEST("ensure_server_cert: cert and key files are created on first start");
     {
         // The cert-gen server deleted its cert files before starting,

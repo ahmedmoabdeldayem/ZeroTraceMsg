@@ -35,6 +35,8 @@ struct Config {
     int prekey_batch_size = 20;
     // Maximum devices a primary identity can link. 0 = unlimited.
     int max_devices_per_user = 5;
+    // Worker threads in the connection pool. 0 = auto (hardware_concurrency, min 1).
+    int worker_threads = 0;
     // Maximum members per group. 0 = unlimited.
     int max_group_members = 50;
     // Maximum groups a user can own. 0 = unlimited.

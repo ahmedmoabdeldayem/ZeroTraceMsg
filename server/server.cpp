@@ -4,6 +4,7 @@
 #include "../common/identity.hpp"
 #include "../common/protocol.hpp"
 #include "../common/store.hpp"
+#include "../common/thread_pool.hpp"
 #include "../common/tls_utils.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
@@ -1229,6 +1230,11 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
     start_metrics_server(cfg);
     std::thread([cfg]() { cleanup_thread(cfg); }).detach();
 
+    // Bounded thread pool — worker_threads workers handle all TLS connections.
+    // Avoids unbounded thread spawning under high concurrency.
+    ThreadPool pool(cfg.worker_threads);
+    LOG_INFO("[*] Thread pool: " + std::to_string(pool.size()) + " workers");
+
     struct pollfd pfd = {server_fd, POLLIN, 0};
     while (!g_shutdown.load()) {
         // SIGHUP: hot-reload mutable config fields without restarting
@@ -1294,7 +1300,7 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
             continue;
 
         g_active_connections.fetch_add(1);
-        std::thread([cfd, creds, policy, cfg]() {
+        pool.submit([cfd, creds, policy, cfg]() {
             struct Guard {
                 ~Guard() { g_active_connections.fetch_sub(1); }
             } guard;
@@ -1307,7 +1313,7 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
             handle_client(
                 cfd, [tls](const std::string& s) { tls_send_line(*tls, s); },
                 [cfd, tls, cb]() { return tls_read_line(cfd, *tls, *cb); }, cfg);
-        }).detach();
+        });
     }
 
     LOG_INFO("[*] Server shut down gracefully.");

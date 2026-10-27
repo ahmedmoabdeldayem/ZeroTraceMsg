@@ -80,6 +80,8 @@ void Config::validate() const
         throw std::invalid_argument("server.prekey_batch_size must be >= 1");
     if (max_devices_per_user < 0)
         throw std::invalid_argument("server.max_devices_per_user must be >= 0");
+    if (worker_threads < 0)
+        throw std::invalid_argument("server.worker_threads must be >= 0");
     if (max_group_members < 0)
         throw std::invalid_argument("server.max_group_members must be >= 0");
     if (max_groups_per_user < 0)
@@ -239,6 +241,8 @@ Config Config::load(const std::string& path)
                     cfg.prekey_batch_size = parse_int(val, key);
                 else if (key == "max_devices_per_user")
                     cfg.max_devices_per_user = parse_int(val, key);
+                else if (key == "worker_threads")
+                    cfg.worker_threads = parse_int(val, key);
                 else if (key == "max_group_members")
                     cfg.max_group_members = parse_int(val, key);
                 else if (key == "max_groups_per_user")
