@@ -1458,6 +1458,42 @@ int main()
     // Prekeys (UPLOAD_PREKEYS / GETPREKEY)
     // -------------------------------------------------------
 
+    TEST("PREKEY_COUNT returns current server-side prekey count");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+
+        // Initially zero
+        std::string r0 = cmd(fd, "PREKEY_COUNT " + id.user_id + " " + tok);
+        ASSERT_EQ(r0, std::string("OK 0"));
+
+        // Upload 3 prekeys
+        auto pks = generate_prekeys(3, rng, g_cfg);
+        std::string up = "UPLOAD_PREKEYS " + id.user_id + " " + tok;
+        for (auto& pk : pks)
+            up += " " + Botan::hex_encode(pk.pubkey_bytes);
+        cmd(fd, up);
+
+        std::string r3 = cmd(fd, "PREKEY_COUNT " + id.user_id + " " + tok);
+        ASSERT_EQ(r3, std::string("OK 3"));
+
+        close(fd);
+    }
+
+    TEST("PREKEY_COUNT rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = cmd(fd, "PREKEY_COUNT " + id.user_id + " " + std::string(64, '0'));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
     TEST("UPLOAD_PREKEYS stores prekeys and GETPREKEY pops one");
     {
         reset_server_state();
