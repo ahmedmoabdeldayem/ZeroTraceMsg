@@ -84,6 +84,8 @@ void Config::validate() const
         throw std::invalid_argument("server.worker_threads must be >= 0");
     if (prekey_refill_threshold < 0)
         throw std::invalid_argument("server.prekey_refill_threshold must be >= 0");
+    if (poll_page_size < 0)
+        throw std::invalid_argument("server.poll_page_size must be >= 0");
     if (max_group_members < 0)
         throw std::invalid_argument("server.max_group_members must be >= 0");
     if (max_groups_per_user < 0)
@@ -247,6 +249,8 @@ Config Config::load(const std::string& path)
                     cfg.worker_threads = parse_int(val, key);
                 else if (key == "prekey_refill_threshold")
                     cfg.prekey_refill_threshold = parse_int(val, key);
+                else if (key == "poll_page_size")
+                    cfg.poll_page_size = parse_int(val, key);
                 else if (key == "max_group_members")
                     cfg.max_group_members = parse_int(val, key);
                 else if (key == "max_groups_per_user")
