@@ -10,7 +10,7 @@ COMMON     = common/config.cpp common/kem.cpp common/identity.cpp common/crypto.
 SERVER_SRC = server/server.cpp
 TESTS      = $(BUILD)/test_identity $(BUILD)/test_crypto $(BUILD)/test_protocol \
              $(BUILD)/test_replay $(BUILD)/test_server $(BUILD)/test_config \
-             $(BUILD)/test_properties $(BUILD)/test_store
+             $(BUILD)/test_properties $(BUILD)/test_store $(BUILD)/test_thread_pool
 FUZZ_TARGETS = $(BUILD)/fuzz_config $(BUILD)/fuzz_crypto
 
 .PHONY: all setup test system-test sanitize coverage fuzz fuzz-build format format-check tidy clean
@@ -127,12 +127,13 @@ FMT_SRCS = common/config.cpp common/config.hpp common/kem.cpp common/kem.hpp \
            tests/test_config.cpp tests/test_properties.cpp \
            tests/fuzz_config.cpp tests/fuzz_crypto.cpp \
            common/crypto.cpp common/crypto.hpp common/identity.cpp common/identity.hpp \
-           common/protocol.hpp common/replay.hpp common/secure_memory.hpp common/tls_utils.hpp \
+           common/protocol.hpp common/replay.hpp common/secure_memory.hpp common/thread_pool.hpp \
+           common/tls_utils.hpp \
            server/server.hpp server/server.cpp server/main.cpp client/main.cpp \
            admin/main.cpp \
            tests/test_runner.hpp tests/test_identity.cpp tests/test_crypto.cpp \
            tests/test_protocol.cpp tests/test_replay.cpp tests/test_server.cpp \
-           tests/test_store.cpp
+           tests/test_store.cpp tests/test_thread_pool.cpp
 
 CLANG_FORMAT ?= xcrun clang-format
 
