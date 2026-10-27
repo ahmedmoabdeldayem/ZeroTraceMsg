@@ -555,6 +555,28 @@ static void poll_thread(std::string server_ip)
                 send_line(fd, "MSGACK " + identity.user_id + " " + session_token + " " + id_list);
                 read_line(fd); // consume OK
             }
+
+            // Prekey replenishment: if server-side count is below threshold, upload
+            // a fresh batch so senders always have one-time prekeys available.
+            if (g_cfg.prekey_refill_threshold > 0) {
+                send_line(fd, "PREKEY_COUNT " + identity.user_id + " " + session_token);
+                std::string cnt_resp = read_line(fd);
+                if (cnt_resp.size() > 3 && cnt_resp.substr(0, 3) == "OK ") {
+                    int server_count = std::stoi(cnt_resp.substr(3));
+                    if (server_count < g_cfg.prekey_refill_threshold) {
+                        auto new_pks = generate_prekeys(g_cfg.prekey_batch_size, rng, g_cfg);
+                        std::string upload =
+                            "UPLOAD_PREKEYS " + identity.user_id + " " + session_token;
+                        for (auto& pk : new_pks)
+                            upload += " " + Botan::hex_encode(pk.pubkey_bytes);
+                        send_line(fd, upload);
+                        read_line(fd); // consume OK / ERR
+                        for (auto& pk : new_pks)
+                            prekey_store[pk.prekey_id] = std::move(pk);
+                        save_prekeys_to_file();
+                    }
+                }
+            }
         }
 
         for (const auto& line : received_lines) {
