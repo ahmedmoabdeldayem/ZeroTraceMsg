@@ -600,8 +600,11 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             }
 
         } else if (cmd == "POLL") {
-            std::string user_id, token;
-            ss >> user_id >> token;
+            // POLL <user_id> <token> [limit]
+            // Optional limit overrides the server's poll_page_size for this request.
+            // 0 = unlimited.
+            std::string user_id, token, limit_str;
+            ss >> user_id >> token >> limit_str;
             std::lock_guard<std::mutex> lock(store_mutex);
             Store& s = get_store();
 
@@ -625,16 +628,30 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 continue;
             }
 
+            // Resolve effective page limit: request limit > server default > 0 (unlimited).
+            int effective_limit = cfg.poll_page_size;
+            if (!limit_str.empty()) {
+                try {
+                    effective_limit = std::stoi(limit_str);
+                } catch (...) {
+                    effective_limit = cfg.poll_page_size;
+                }
+            }
+
             // Phase 1: mark pending messages in-flight and return them.
             // The client must follow up with MSGACK to delete them. Until then
             // the messages are retained so a crashed client gets re-delivery.
-            auto msgs = s.peek_inbox(user_id, now_unix());
+            auto msgs = s.peek_inbox(user_id, now_unix(), effective_limit);
             if (!msgs.empty()) {
                 for (auto& msg : msgs)
                     sl("MSG " + msg.id + " " + msg.prekey_id + " " + Botan::hex_encode(msg.blob));
                 LOG_INFO("[POLL]     user=" + user_id + " -> sent " + std::to_string(msgs.size()) +
                          " message(s) (awaiting MSGACK)");
             }
+
+            // If the limit truncated the inbox, tell the client more messages are waiting.
+            if (effective_limit > 0 && s.pending_count(user_id) > 0)
+                sl("MORE");
 
             int ack = s.drain_ack(user_id);
             if (ack > 0)

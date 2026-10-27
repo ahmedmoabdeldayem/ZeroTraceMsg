@@ -39,6 +39,8 @@ struct Config {
     int worker_threads = 0;
     // Upload a fresh prekey batch when server-side count falls below this threshold.
     int prekey_refill_threshold = 5;
+    // Max messages returned per POLL. 0 = unlimited (legacy behaviour).
+    int poll_page_size = 0;
     // Maximum members per group. 0 = unlimited.
     int max_group_members = 50;
     // Maximum groups a user can own. 0 = unlimited.

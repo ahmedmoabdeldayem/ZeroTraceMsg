@@ -390,6 +390,34 @@ int main()
         ASSERT_EQ(msgs[0].prekey_id, std::string("aabbccdd11223344"));
     }
 
+    TEST("peek_inbox respects limit and leaves remainder pending");
+    {
+        Store s("");
+        s.put_user("recip000000001", {0xAA});
+        for (int i = 0; i < 4; ++i)
+            s.enqueue("id" + std::to_string(i), "recip000000001", "sender00000001", {0xBB}, "_",
+                      i * 100);
+        // peek with limit=2 — only 2 marked in-flight
+        auto page1 = s.peek_inbox("recip000000001", 999, 2);
+        ASSERT_EQ(page1.size(), (size_t)2);
+        ASSERT_EQ(s.pending_count("recip000000001"), 2); // 2 still pending
+        // second peek gets remaining 2
+        auto page2 = s.peek_inbox("recip000000001", 999, 0);
+        ASSERT_EQ(page2.size(), (size_t)2);
+        ASSERT_EQ(s.pending_count("recip000000001"), 0);
+    }
+
+    TEST("pending_count counts only non-in-flight messages");
+    {
+        Store s("");
+        s.put_user("recip000000001", {0xAA});
+        s.enqueue("m1", "recip000000001", "s", {0x01}, "_", 1);
+        s.enqueue("m2", "recip000000001", "s", {0x02}, "_", 2);
+        ASSERT_EQ(s.pending_count("recip000000001"), 2);
+        s.peek_inbox("recip000000001", 999, 1); // marks 1 in-flight
+        ASSERT_EQ(s.pending_count("recip000000001"), 1);
+    }
+
     // ── linked devices ────────────────────────────────────────────────────────
 
     TEST("link_device / get_linked_devices / device_count round-trip");
