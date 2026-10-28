@@ -102,6 +102,8 @@ void Config::validate() const
         throw std::invalid_argument("client.msg_ttl_s must be >= 1");
     if (connection_timeout_s < 1)
         throw std::invalid_argument("client.connection_timeout_s must be >= 1");
+    if (max_reconnect_delay_s < 1)
+        throw std::invalid_argument("client.max_reconnect_delay_s must be >= 1");
 
     // tls
     static const std::set<std::string> tls_versions = {"1.2", "1.3"};
@@ -277,6 +279,8 @@ Config Config::load(const std::string& path)
                     cfg.connection_timeout_s = parse_int(val, key);
                 else if (key == "reconnect_on_disconnect")
                     cfg.reconnect_on_disconnect = parse_bool(val, key);
+                else if (key == "max_reconnect_delay_s")
+                    cfg.max_reconnect_delay_s = parse_int(val, key);
                 else
                     bad("unknown key in [client]: " + key);
 
