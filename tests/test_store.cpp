@@ -506,6 +506,16 @@ int main()
         ASSERT_EQ(s.member_count("grp0000000001234"), 0);
     }
 
+    TEST("set_group_owner changes group ownership");
+    {
+        Store s("");
+        s.create_group("grp0000000001234", "owner000000001", "G");
+        s.add_member("grp0000000001234", "owner000000001");
+        s.add_member("grp0000000001234", "member00000001");
+        s.set_group_owner("grp0000000001234", "member00000001");
+        ASSERT_EQ(s.group_owner("grp0000000001234"), std::string("member00000001"));
+    }
+
     TEST("remove_user_from_all_groups deletes owned groups and removes memberships");
     {
         Store s("");
