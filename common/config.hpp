@@ -57,6 +57,8 @@ struct Config {
     std::string identity_dir = "users/";
     int connection_timeout_s = 10;
     bool reconnect_on_disconnect = true;
+    // Maximum delay between reconnect attempts (exponential backoff caps here).
+    int max_reconnect_delay_s = 60;
 
     // ── [tls] ───────────────────────────────────────────────────────────
     // [local] min_version:   1.2 | 1.3

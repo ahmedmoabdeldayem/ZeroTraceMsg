@@ -552,6 +552,28 @@ static void redraw_screen()
 // -------------------------------------------------------
 // Poll for new messages — runs on background thread
 // -------------------------------------------------------
+// Attempt to reconnect with exponential backoff.
+// Returns the new fd on success, -1 if reconnect_on_disconnect is disabled.
+static int reconnect_with_backoff(const std::string& server_ip)
+{
+    if (!g_cfg.reconnect_on_disconnect)
+        return -1;
+
+    int delay_s = 1;
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(delay_s));
+        int new_fd = connect_to_server(server_ip);
+        if (new_fd >= 0) {
+            if (do_hello(new_fd) && do_register(new_fd)) {
+                std::cout << "\n[reconnected]\n> " << std::flush;
+                return new_fd;
+            }
+            close(new_fd);
+        }
+        delay_s = std::min(delay_s * 2, g_cfg.max_reconnect_delay_s);
+    }
+}
+
 static void poll_thread(std::string server_ip)
 {
     while (true) {
@@ -561,18 +583,23 @@ static void poll_thread(std::string server_ip)
         if (fd < 0)
             continue;
 
+        bool disconnected = false;
         std::vector<std::string> received_lines;
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
             // Re-poll in a loop when server signals MORE (paginated inbox).
             bool more = true;
-            while (more) {
+            while (more && !disconnected) {
                 more = false;
                 send_line(fd, "POLL " + identity.user_id + " " + session_token);
                 std::vector<std::string> msg_ids;
                 while (true) {
                     std::string line = read_line(fd);
-                    if (line == "NOMSG" || line.empty())
+                    if (line.empty()) {
+                        disconnected = true;
+                        break;
+                    }
+                    if (line == "NOMSG")
                         break;
                     if (line == "MORE") {
                         more = true;
@@ -590,7 +617,7 @@ static void poll_thread(std::string server_ip)
                     }
                 }
                 // Phase 2: confirm receipt so the server deletes the messages.
-                if (!msg_ids.empty()) {
+                if (!disconnected && !msg_ids.empty()) {
                     std::string id_list;
                     for (size_t i = 0; i < msg_ids.size(); ++i) {
                         if (i > 0)
@@ -599,16 +626,19 @@ static void poll_thread(std::string server_ip)
                     }
                     send_line(fd,
                               "MSGACK " + identity.user_id + " " + session_token + " " + id_list);
-                    read_line(fd); // consume OK
+                    if (read_line(fd).empty())
+                        disconnected = true;
                 }
             } // end while (more)
 
             // Prekey replenishment: if server-side count is below threshold, upload
             // a fresh batch so senders always have one-time prekeys available.
-            if (g_cfg.prekey_refill_threshold > 0) {
+            if (!disconnected && g_cfg.prekey_refill_threshold > 0) {
                 send_line(fd, "PREKEY_COUNT " + identity.user_id + " " + session_token);
                 std::string cnt_resp = read_line(fd);
-                if (cnt_resp.size() > 3 && cnt_resp.substr(0, 3) == "OK ") {
+                if (cnt_resp.empty()) {
+                    disconnected = true;
+                } else if (cnt_resp.size() > 3 && cnt_resp.substr(0, 3) == "OK ") {
                     int server_count = std::stoi(cnt_resp.substr(3));
                     if (server_count < g_cfg.prekey_refill_threshold) {
                         auto new_pks = generate_prekeys(g_cfg.prekey_batch_size, rng, g_cfg);
@@ -617,28 +647,41 @@ static void poll_thread(std::string server_ip)
                         for (auto& pk : new_pks)
                             upload += " " + Botan::hex_encode(pk.pubkey_bytes);
                         send_line(fd, upload);
-                        read_line(fd); // consume OK / ERR
-                        for (auto& pk : new_pks)
-                            prekey_store[pk.prekey_id] = std::move(pk);
-                        save_prekeys_to_file();
+                        if (read_line(fd).empty()) {
+                            disconnected = true;
+                        } else {
+                            for (auto& pk : new_pks)
+                                prekey_store[pk.prekey_id] = std::move(pk);
+                            save_prekeys_to_file();
+                        }
                     }
                 }
             }
 
             // Session auto-refresh: when TTL is configured and fewer than
             // session_refresh_hours remain, request a new token proactively.
-            if (g_cfg.session_ttl_hours > 0 && g_cfg.session_refresh_hours > 0) {
+            if (!disconnected && g_cfg.session_ttl_hours > 0 && g_cfg.session_refresh_hours > 0) {
                 int64_t age_h = (now_unix() - session_created_at.load()) / 3600;
                 int64_t remaining_h = g_cfg.session_ttl_hours - age_h;
                 if (remaining_h <= g_cfg.session_refresh_hours) {
                     send_line(fd, "REFRESH_TOKEN " + identity.user_id + " " + session_token);
                     std::string ref = read_line(fd);
-                    if (ref.size() > 3 && ref.substr(0, 3) == "OK ") {
+                    if (ref.empty()) {
+                        disconnected = true;
+                    } else if (ref.size() > 3 && ref.substr(0, 3) == "OK ") {
                         session_token = ref.substr(3);
                         session_created_at.store(now_unix());
                     }
                 }
             }
+        }
+
+        if (disconnected) {
+            sock_fd.store(-1);
+            int new_fd = reconnect_with_backoff(server_ip);
+            if (new_fd >= 0)
+                sock_fd.store(new_fd);
+            continue;
         }
 
         for (const auto& line : received_lines) {
