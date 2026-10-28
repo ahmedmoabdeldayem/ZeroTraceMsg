@@ -527,34 +527,44 @@ static void poll_thread(std::string server_ip)
         std::vector<std::string> received_lines;
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
-            send_line(fd, "POLL " + identity.user_id + " " + session_token);
-            std::vector<std::string> msg_ids;
-            while (true) {
-                std::string line = read_line(fd);
-                if (line == "NOMSG" || line.empty())
-                    break;
-                if (line.substr(0, 4) == "ACK ") {
-                    delivered_at.store(now_unix());
-                } else if (line.substr(0, 4) == "MSG ") {
-                    std::istringstream ss(line.substr(4));
-                    std::string msg_id, pk_id;
-                    ss >> msg_id >> pk_id;
-                    msg_ids.push_back(msg_id);
-                    received_lines.push_back(line);
-                    (void)pk_id;
+            // Re-poll in a loop when server signals MORE (paginated inbox).
+            bool more = true;
+            while (more) {
+                more = false;
+                send_line(fd, "POLL " + identity.user_id + " " + session_token);
+                std::vector<std::string> msg_ids;
+                while (true) {
+                    std::string line = read_line(fd);
+                    if (line == "NOMSG" || line.empty())
+                        break;
+                    if (line == "MORE") {
+                        more = true;
+                        continue;
+                    }
+                    if (line.substr(0, 4) == "ACK ") {
+                        delivered_at.store(now_unix());
+                    } else if (line.substr(0, 4) == "MSG ") {
+                        std::istringstream ss(line.substr(4));
+                        std::string msg_id, pk_id;
+                        ss >> msg_id >> pk_id;
+                        msg_ids.push_back(msg_id);
+                        received_lines.push_back(line);
+                        (void)pk_id;
+                    }
                 }
-            }
-            // Phase 2: confirm receipt so the server deletes the messages.
-            if (!msg_ids.empty()) {
-                std::string id_list;
-                for (size_t i = 0; i < msg_ids.size(); ++i) {
-                    if (i > 0)
-                        id_list += ',';
-                    id_list += msg_ids[i];
+                // Phase 2: confirm receipt so the server deletes the messages.
+                if (!msg_ids.empty()) {
+                    std::string id_list;
+                    for (size_t i = 0; i < msg_ids.size(); ++i) {
+                        if (i > 0)
+                            id_list += ',';
+                        id_list += msg_ids[i];
+                    }
+                    send_line(fd,
+                              "MSGACK " + identity.user_id + " " + session_token + " " + id_list);
+                    read_line(fd); // consume OK
                 }
-                send_line(fd, "MSGACK " + identity.user_id + " " + session_token + " " + id_list);
-                read_line(fd); // consume OK
-            }
+            } // end while (more)
 
             // Prekey replenishment: if server-side count is below threshold, upload
             // a fresh batch so senders always have one-time prekeys available.

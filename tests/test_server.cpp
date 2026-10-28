@@ -1458,6 +1458,73 @@ int main()
     // Prekeys (UPLOAD_PREKEYS / GETPREKEY)
     // -------------------------------------------------------
 
+    // -------------------------------------------------------
+    // POLL pagination
+    // -------------------------------------------------------
+
+    TEST("POLL with limit returns at most limit messages and emits MORE");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recip = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(
+            cmd(fd, "REGISTER " + recip.user_id + " " + Botan::hex_encode(recip.pubkey_bytes)));
+        for (int i = 0; i < 3; ++i) {
+            auto blob = encrypt_message("m", sender.user_id, "s", recip.pubkey_bytes, rng, g_cfg);
+            cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recip.user_id + " _ " +
+                        Botan::hex_encode(blob));
+        }
+        // POLL with limit=2 → 2 MSG + MORE + NOMSG
+        send_line(fd, "POLL " + recip.user_id + " " + r_tok + " 2");
+        int mc = 0;
+        bool got_more = false;
+        std::vector<std::string> ids;
+        while (true) {
+            std::string line = read_line(fd);
+            if (line == "NOMSG" || line.empty())
+                break;
+            if (line == "MORE") {
+                got_more = true;
+            } else if (line.substr(0, 4) == "MSG ") {
+                std::istringstream ss(line.substr(4));
+                std::string mid;
+                ss >> mid;
+                ids.push_back(mid);
+                ++mc;
+            }
+        }
+        ASSERT_EQ(mc, 2);
+        ASSERT_TRUE(got_more);
+        // MSGACK the 2 messages, then poll remainder
+        cmd(fd, "MSGACK " + recip.user_id + " " + r_tok + " " + ids[0] + "," + ids[1]);
+        auto remaining = poll_all(fd, recip.user_id, r_tok);
+        ASSERT_EQ(remaining.size(), (size_t)1);
+        close(fd);
+    }
+
+    TEST("POLL without limit returns all messages with no MORE");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recip = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(
+            cmd(fd, "REGISTER " + recip.user_id + " " + Botan::hex_encode(recip.pubkey_bytes)));
+        for (int i = 0; i < 3; ++i) {
+            auto blob = encrypt_message("x", sender.user_id, "s", recip.pubkey_bytes, rng, g_cfg);
+            cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recip.user_id + " _ " +
+                        Botan::hex_encode(blob));
+        }
+        auto blobs = poll_all(fd, recip.user_id, r_tok);
+        ASSERT_EQ(blobs.size(), (size_t)3);
+        close(fd);
+    }
+
     TEST("PREKEY_COUNT returns current server-side prekey count");
     {
         reset_server_state();

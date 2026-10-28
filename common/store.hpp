@@ -63,7 +63,11 @@ class Store
                  const std::string& prekey_id, int64_t ts);
     int inbox_size(const std::string& recipient_id);
     // Phase 1: return pending messages and mark them in-flight (not yet deleted).
-    std::vector<MessageRow> peek_inbox(const std::string& recipient_id, int64_t now);
+    // limit=0 returns all pending; limit>0 returns at most limit messages.
+    // Returns only the fetched rows as in-flight; remaining pending are untouched.
+    std::vector<MessageRow> peek_inbox(const std::string& recipient_id, int64_t now, int limit = 0);
+    // Count of pending (not in-flight) messages for recipient.
+    int pending_count(const std::string& recipient_id);
     // Returns the sender_id for each of the given message IDs that belong to recipient.
     // Used to credit delivery acks before deletion.
     std::vector<std::string> sender_ids_for(const std::string& recipient_id,

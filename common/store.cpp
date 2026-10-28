@@ -253,6 +253,17 @@ int Store::inbox_size(const std::string& recipient_id)
     return sqlite3_column_int(st.s, 0);
 }
 
+int Store::pending_count(const std::string& recipient_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(
+        db_, "SELECT COUNT(*) FROM messages WHERE recipient_id=? AND in_flight_at IS NULL", -1,
+        &st.s, nullptr));
+    check(sqlite3_bind_text(st.s, 1, recipient_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+    return sqlite3_column_int(st.s, 0);
+}
+
 std::vector<Store::MessageRow> Store::drain_inbox(const std::string& recipient_id)
 {
     exec("BEGIN");
@@ -290,18 +301,19 @@ std::vector<Store::MessageRow> Store::drain_inbox(const std::string& recipient_i
     return rows;
 }
 
-std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id, int64_t now)
+std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id, int64_t now,
+                                                 int limit)
 {
     exec("BEGIN");
     std::vector<MessageRow> rows;
 
     {
         Stmt st;
-        check(sqlite3_prepare_v2(
-            db_,
-            "SELECT id, sender_id, prekey_id, blob FROM messages"
-            " WHERE recipient_id=? AND in_flight_at IS NULL ORDER BY timestamp ASC",
-            -1, &st.s, nullptr));
+        std::string sql = "SELECT id, sender_id, prekey_id, blob FROM messages"
+                          " WHERE recipient_id=? AND in_flight_at IS NULL ORDER BY timestamp ASC";
+        if (limit > 0)
+            sql += " LIMIT " + std::to_string(limit);
+        check(sqlite3_prepare_v2(db_, sql.c_str(), -1, &st.s, nullptr));
         check(sqlite3_bind_text(st.s, 1, recipient_id.c_str(), -1, SQLITE_STATIC));
         while (sqlite3_step(st.s) == SQLITE_ROW) {
             MessageRow row;
@@ -316,14 +328,16 @@ std::vector<Store::MessageRow> Store::peek_inbox(const std::string& recipient_id
         }
     }
 
+    // Mark only the fetched messages as in-flight (not all pending).
     if (!rows.empty()) {
-        Stmt st;
-        check(sqlite3_prepare_v2(
-            db_, "UPDATE messages SET in_flight_at=? WHERE recipient_id=? AND in_flight_at IS NULL",
-            -1, &st.s, nullptr));
-        check(sqlite3_bind_int64(st.s, 1, now));
-        check(sqlite3_bind_text(st.s, 2, recipient_id.c_str(), -1, SQLITE_STATIC));
-        check(sqlite3_step(st.s));
+        for (const auto& row : rows) {
+            Stmt st;
+            check(sqlite3_prepare_v2(db_, "UPDATE messages SET in_flight_at=? WHERE id=?", -1,
+                                     &st.s, nullptr));
+            check(sqlite3_bind_int64(st.s, 1, now));
+            check(sqlite3_bind_text(st.s, 2, row.id.c_str(), -1, SQLITE_STATIC));
+            check(sqlite3_step(st.s));
+        }
     }
 
     exec("COMMIT");
