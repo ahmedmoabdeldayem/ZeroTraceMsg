@@ -336,5 +336,40 @@ int main()
         std::remove(path.c_str());
     }
 
+    // ── password change ───────────────────────────────────────────────────────
+
+    TEST("password change: re-encrypt identity with new passphrase, old passphrase rejected");
+    {
+        Config cfg;
+        cfg.passphrase_kdf = "Argon2id";
+        cfg.passphrase_kdf_memory_kb = 8;
+        cfg.passphrase_kdf_cost = 1;
+        cfg.passphrase_kdf_parallelism = 1;
+        const std::string path = "/tmp/ztm_test_pw_change.enc";
+
+        auto id = generate_identity(rng, cfg);
+        auto old_pass = make_secure("old-passphrase");
+        save_identity(id, old_pass, path, rng, cfg);
+
+        // Re-encrypt with new passphrase (simulates --change-password)
+        auto new_pass = make_secure("new-passphrase");
+        save_identity(id, new_pass, path, rng, cfg);
+
+        // New passphrase works
+        auto reloaded = load_identity(new_pass, path, cfg);
+        ASSERT_EQ(id.user_id, reloaded.user_id);
+        ASSERT_EQ(id.pubkey_bytes, reloaded.pubkey_bytes);
+
+        // Old passphrase is rejected
+        bool threw = false;
+        try {
+            load_identity(old_pass, path, cfg);
+        } catch (...) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw);
+        std::remove(path.c_str());
+    }
+
     SUITE_RESULTS();
 }

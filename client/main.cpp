@@ -760,6 +760,7 @@ int main(int argc, char* argv[])
     // Optional flags
     std::string config_path = "zerotrace.conf";
     bool do_rekey = false;
+    bool do_change_password = false;
     std::string link_primary; // --link-device <primary_id>
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
@@ -767,6 +768,8 @@ int main(int argc, char* argv[])
             config_path = argv[++i];
         else if (a == "--rekey")
             do_rekey = true;
+        else if (a == "--change-password")
+            do_change_password = true;
         else if (a == "--link-device" && i + 1 < argc)
             link_primary = argv[++i];
     }
@@ -896,6 +899,38 @@ int main(int argc, char* argv[])
         } else {
             std::cerr << "Failed to link device: " << resp << "\n";
         }
+    }
+
+    // -------------------------------------------------------
+    // Password change mode (--change-password)
+    // -------------------------------------------------------
+    if (do_change_password) {
+        // Identity is already loaded above (current passphrase was correct).
+        // Ask for the new passphrase, confirm it, re-encrypt and save.
+        std::cout << "Changing passphrase for identity: " << identity.user_id << "\n";
+        auto new_pass1 = read_passphrase("New passphrase: ");
+        auto new_pass2 = read_passphrase("Confirm new passphrase: ");
+
+        // Compare as strings — SecureString is a vector<char> (or similar).
+        if (std::string(new_pass1.data(), new_pass1.size()) !=
+            std::string(new_pass2.data(), new_pass2.size())) {
+            std::cerr << "Passphrases do not match. Password not changed.\n";
+            return 1;
+        }
+        if (new_pass1.empty()) {
+            std::cerr << "Passphrase must not be empty. Password not changed.\n";
+            return 1;
+        }
+
+        try {
+            save_identity(identity, new_pass1, identity_file, rng, g_cfg);
+            chmod(identity_file.c_str(), 0600);
+            std::cout << "Passphrase updated successfully.\n";
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to save identity: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
     }
 
     // -------------------------------------------------------
