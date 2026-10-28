@@ -243,6 +243,23 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 sl("OK " + Botan::hex_encode(*key));
             }
 
+        } else if (cmd == "GETFINGERPRINT") {
+            // GETFINGERPRINT <user_id>
+            // Returns SHA-256(pubkey_bytes) as hex. No auth required — public information.
+            // Clients use this to compute and display safety numbers for out-of-band
+            // identity verification.
+            std::string user_id;
+            ss >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            auto key = get_store().get_pubkey(user_id);
+            if (!key.has_value()) {
+                sl("ERR unknown user");
+            } else {
+                auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+                sha->update(*key);
+                sl("OK " + Botan::hex_encode(sha->final()));
+            }
+
         } else if (cmd == "GETPREKEY") {
             // Returns the user's identity pubkey and one popped one-time prekey (if available).
             // Response: OK <identity_pubkey_hex> <prekey_id> <prekey_pubkey_hex>
@@ -283,6 +300,29 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 continue;
             }
             sl("OK " + std::to_string(s.prekey_count(user_id)));
+
+        } else if (cmd == "REFRESH_TOKEN") {
+            // REFRESH_TOKEN <user_id> <old_token>
+            // Issues a new session token, resetting the session TTL clock.
+            // Lets long-running clients stay authenticated without re-registering.
+            std::string user_id, token;
+            ss >> user_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            std::string new_token = Botan::hex_encode(rng.random_vec(32));
+            s.put_session(user_id, new_token, now_unix());
+            sl("OK " + new_token);
+            LOG_INFO("[REFRESH_TOKEN] user=" + user_id);
 
         } else if (cmd == "UPLOAD_PREKEYS") {
             // UPLOAD_PREKEYS <user_id> <token> <pk1_hex> [<pk2_hex> ...]
@@ -518,6 +558,88 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                     resp += " " + m;
                 sl(resp);
             }
+
+        } else if (cmd == "DELETE_GROUP") {
+            // DELETE_GROUP <group_id> <owner_id> <token>
+            // Only the group owner can disband the group and remove all members.
+            std::string group_id, owner_id, token;
+            ss >> group_id >> owner_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok || s.group_owner(group_id) != owner_id) {
+                sl("ERR not group owner");
+                continue;
+            }
+            s.delete_group(group_id);
+            sl("OK");
+            LOG_INFO("[DELETE_GROUP] group=" + group_id + " owner=" + owner_id);
+
+        } else if (cmd == "LEAVE_GROUP") {
+            // LEAVE_GROUP <group_id> <user_id> <token>
+            // Any member (including the owner) can leave. If the owner leaves, the group
+            // persists but has no owner — the admin must delete it.
+            std::string group_id, user_id, token;
+            ss >> group_id >> user_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            if (!s.is_member(group_id, user_id)) {
+                sl("ERR not a member");
+                continue;
+            }
+            s.remove_member(group_id, user_id);
+            sl("OK");
+            LOG_INFO("[LEAVE_GROUP] group=" + group_id + " user=" + user_id);
+
+        } else if (cmd == "TRANSFER_GROUP") {
+            // TRANSFER_GROUP <group_id> <owner_id> <token> <new_owner_id>
+            // Transfer ownership to a current member.
+            std::string group_id, owner_id, token, new_owner_id;
+            ss >> group_id >> owner_id >> token >> new_owner_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+            if (!s.group_exists(group_id)) {
+                sl("ERR unknown group");
+                continue;
+            }
+            auto sess = s.get_session(owner_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok || s.group_owner(group_id) != owner_id) {
+                sl("ERR not group owner");
+                continue;
+            }
+            if (!s.is_member(group_id, new_owner_id)) {
+                sl("ERR new owner is not a member");
+                continue;
+            }
+            s.set_group_owner(group_id, new_owner_id);
+            sl("OK");
+            LOG_INFO("[TRANSFER_GROUP] group=" + group_id + " old=" + owner_id +
+                     " new=" + new_owner_id);
 
         } else if (cmd == "SEND") {
             std::string sender_id, token, recipient_id, prekey_id, blob_hex;

@@ -12,6 +12,7 @@
 #include <atomic>
 #include <botan/aead.h>
 #include <botan/auto_rng.h>
+#include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/secmem.h>
 #include <botan/x509cert.h>
@@ -108,6 +109,7 @@ static Identity identity;
 static std::atomic<int> sock_fd{-1};
 static std::string username_local;                      // chosen username, sealed in messages
 static std::string session_token;                       // issued by server on REGISTER
+static std::atomic<int64_t> session_created_at{0};      // unix timestamp of last REGISTER/REFRESH
 static std::map<std::string, PrekeyPair> prekey_store;  // prekey_id → private key pair
 static std::string prekeys_file;                        // path to persisted prekey private keys
 static std::atomic<int64_t> sent_at{0};                 // timestamp of last send
@@ -374,6 +376,7 @@ static bool do_register(int fd)
     if (resp.substr(0, 3) == "OK ") {
         std::istringstream ss(resp.substr(3));
         ss >> session_token; // first word is the token
+        session_created_at.store(now_unix());
         // remaining words are key=value crypto params
         std::string rest;
         std::getline(ss >> std::ws, rest);
@@ -389,6 +392,40 @@ static bool do_register(int fd)
 // Send an encrypted message to recipient
 // -------------------------------------------------------
 // Send one encrypted message to a single target_id (may be primary or a linked device).
+// Format 32 raw bytes as a safety number: 12 groups of 5 decimal digits.
+// Each group encodes 2.5 bytes (20 bits) from the hash, giving ~60 bits of visual entropy.
+static std::string format_safety_number(const std::vector<uint8_t>& hash32)
+{
+    std::string result;
+    for (int i = 0; i < 12; ++i) {
+        // Read 3 bytes (24 bits), use top 20 bits → value 0–999999, display as 5-digit group.
+        int off = i * 2; // stride of 2 bytes for 12 groups from 32 bytes
+        if (off + 2 >= static_cast<int>(hash32.size()))
+            off = static_cast<int>(hash32.size()) - 3;
+        uint32_t v = (static_cast<uint32_t>(hash32[static_cast<size_t>(off)]) << 16) |
+                     (static_cast<uint32_t>(hash32[static_cast<size_t>(off) + 1]) << 8) |
+                     static_cast<uint32_t>(hash32[static_cast<size_t>(off) + 2]);
+        v = (v >> 4) % 100000; // top 20 bits mod 100000 → 5 digits
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%05u", v);
+        if (i > 0)
+            result += ' ';
+        result += buf;
+    }
+    return result;
+}
+
+// Fetch the SHA-256 fingerprint of a user_id from the server (via GETFINGERPRINT).
+// Returns empty string on failure.
+static std::string fetch_fingerprint(int fd, const std::string& user_id)
+{
+    send_line(fd, "GETFINGERPRINT " + user_id);
+    std::string resp = read_line(fd);
+    if (resp.size() > 3 && resp.substr(0, 3) == "OK ")
+        return resp.substr(3);
+    return "";
+}
+
 static void send_to_one(int fd, const std::string& target_id, const std::string& text)
 {
     std::vector<uint8_t> encrypt_pub;
@@ -584,6 +621,21 @@ static void poll_thread(std::string server_ip)
                         for (auto& pk : new_pks)
                             prekey_store[pk.prekey_id] = std::move(pk);
                         save_prekeys_to_file();
+                    }
+                }
+            }
+
+            // Session auto-refresh: when TTL is configured and fewer than
+            // session_refresh_hours remain, request a new token proactively.
+            if (g_cfg.session_ttl_hours > 0 && g_cfg.session_refresh_hours > 0) {
+                int64_t age_h = (now_unix() - session_created_at.load()) / 3600;
+                int64_t remaining_h = g_cfg.session_ttl_hours - age_h;
+                if (remaining_h <= g_cfg.session_refresh_hours) {
+                    send_line(fd, "REFRESH_TOKEN " + identity.user_id + " " + session_token);
+                    std::string ref = read_line(fd);
+                    if (ref.size() > 3 && ref.substr(0, 3) == "OK ") {
+                        session_token = ref.substr(3);
+                        session_created_at.store(now_unix());
                     }
                 }
             }
@@ -922,6 +974,62 @@ int main(int argc, char* argv[])
             if (id.size() == USER_ID_LEN && !nick.empty()) {
                 add_contact(id, nick);
             }
+        } else if (first == "/fingerprint") {
+            // Show own identity fingerprint (SHA-256 of public key as safety number).
+            auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+            sha->update(identity.pubkey_bytes);
+            auto digest = sha->final();
+            std::vector<uint8_t> dv(digest.begin(), digest.end());
+            std::cout << "\n[your fingerprint]\n  id:  " << identity.user_id
+                      << "\n  key: " << format_safety_number(dv) << "\n";
+        } else if (first == "/verify") {
+            // /verify <nickname_or_id>
+            // Fetches the other party's fingerprint and displays both side-by-side
+            // so users can compare them out-of-band to detect MITM.
+            std::string target;
+            ss >> target;
+            std::string resolved = resolve_id(target);
+            if (resolved.empty()) {
+                std::cout << "\n[unknown contact: " << target << "]\n";
+            } else {
+                std::string fp_hex;
+                {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    fp_hex = fetch_fingerprint(fd, resolved);
+                }
+                if (fp_hex.empty()) {
+                    std::cout << "\n[failed to fetch fingerprint for " << resolved << "]\n";
+                } else {
+                    auto remote_bytes = Botan::hex_decode(fp_hex);
+                    std::vector<uint8_t> remote_v(remote_bytes.begin(), remote_bytes.end());
+
+                    auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+                    sha->update(identity.pubkey_bytes);
+                    auto own_digest = sha->final();
+                    std::vector<uint8_t> own_v(own_digest.begin(), own_digest.end());
+
+                    // Safety number = hash of (sorted) both fingerprints concatenated.
+                    // Sort by user_id so both parties compute the same number.
+                    std::vector<uint8_t> combined;
+                    const std::string& a = identity.user_id;
+                    const std::string& b = resolved;
+                    const auto& first_fp = (a < b) ? own_v : remote_v;
+                    const auto& second_fp = (a < b) ? remote_v : own_v;
+                    combined.insert(combined.end(), first_fp.begin(), first_fp.end());
+                    combined.insert(combined.end(), second_fp.begin(), second_fp.end());
+
+                    auto sha2 = Botan::HashFunction::create_or_throw("SHA-256");
+                    sha2->update(combined);
+                    auto safety = sha2->final();
+                    std::vector<uint8_t> safety_v(safety.begin(), safety.end());
+
+                    std::cout << "\n[safety number with " << target << " (" << resolved << ")]\n"
+                              << "  " << format_safety_number(safety_v) << "\n"
+                              << "\nCompare this number with " << target
+                              << " over a trusted channel.\n"
+                              << "If it matches on both sides, your conversation is secure.\n";
+                }
+            }
         } else if (first == "/group") {
             // /group create <name>
             // /group add <group_id> <user_id>
@@ -989,6 +1097,39 @@ int main(int argc, char* argv[])
                         if (m != identity.user_id)
                             send_to_one(fd, m, text);
                     sent_at.store(now_unix());
+                }
+            } else if (sub == "delete") {
+                std::string gid;
+                ss >> gid;
+                if (gid.empty()) {
+                    std::cout << "\n[usage: /group delete <group_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd,
+                              "DELETE_GROUP " + gid + " " + identity.user_id + " " + session_token);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
+            } else if (sub == "leave") {
+                std::string gid;
+                ss >> gid;
+                if (gid.empty()) {
+                    std::cout << "\n[usage: /group leave <group_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd,
+                              "LEAVE_GROUP " + gid + " " + identity.user_id + " " + session_token);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
+            } else if (sub == "transfer") {
+                std::string gid, new_owner;
+                ss >> gid >> new_owner;
+                if (gid.empty() || new_owner.empty()) {
+                    std::cout << "\n[usage: /group transfer <group_id> <new_owner_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd, "TRANSFER_GROUP " + gid + " " + identity.user_id + " " +
+                                      session_token + " " + new_owner);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
                 }
             }
         } else {

@@ -9,6 +9,7 @@
 #include "test_runner.hpp"
 #include <arpa/inet.h>
 #include <botan/auto_rng.h>
+#include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/tls_session_manager_noop.h>
 #include <chrono>
@@ -1525,6 +1526,71 @@ int main()
         close(fd);
     }
 
+    // -------------------------------------------------------
+    // Key fingerprint verification (GETFINGERPRINT)
+    // -------------------------------------------------------
+
+    TEST("GETFINGERPRINT returns 64-hex SHA-256 of registered pubkey");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = cmd(fd, "GETFINGERPRINT " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string fp = resp.substr(3);
+        ASSERT_EQ(fp.size(), (size_t)64); // 32 bytes SHA-256 → 64 hex chars
+        // Verify it's actually SHA-256(pubkey)
+        auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+        sha->update(id.pubkey_bytes);
+        ASSERT_EQ(fp, Botan::hex_encode(sha->final()));
+        close(fd);
+    }
+
+    TEST("GETFINGERPRINT returns ERR for unknown user");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        ASSERT_TRUE(cmd(fd, "GETFINGERPRINT 0000000000000000").substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Session refresh (REFRESH_TOKEN)
+    // -------------------------------------------------------
+
+    TEST("REFRESH_TOKEN issues a new token; old token no longer works");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string old_tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+
+        std::string resp = cmd(fd, "REFRESH_TOKEN " + id.user_id + " " + old_tok);
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string new_tok = resp.substr(3);
+        ASSERT_EQ(new_tok.size(), (size_t)64);
+        ASSERT_TRUE(new_tok != old_tok);
+        // Old token rejected; new token accepted
+        ASSERT_TRUE(cmd(fd, "POLL " + id.user_id + " " + old_tok).substr(0, 3) == "ERR");
+        ASSERT_TRUE(cmd(fd, "POLL " + id.user_id + " " + new_tok).find("NOMSG") !=
+                    std::string::npos);
+        close(fd);
+    }
+
+    TEST("REFRESH_TOKEN rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_TRUE(
+            cmd(fd, "REFRESH_TOKEN " + id.user_id + " " + std::string(64, '0')).substr(0, 3) ==
+            "ERR");
+        close(fd);
+    }
+
     TEST("PREKEY_COUNT returns current server-side prekey count");
     {
         reset_server_state();
@@ -1984,6 +2050,117 @@ int main()
         std::string resp =
             cmd(fd, "REMOVE_MEMBER 0000000000000000 " + id.user_id + " " + tok + " " + id.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Group management: DELETE_GROUP, LEAVE_GROUP, TRANSFER_GROUP
+    // -------------------------------------------------------
+
+    TEST("DELETE_GROUP disbands the group; LIST_MEMBERS returns ERR after");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto member = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        cmd(fd, "REGISTER " + member.user_id + " " + Botan::hex_encode(member.pubkey_bytes));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
+        std::string del = cmd(fd, "DELETE_GROUP " + gid + " " + owner.user_id + " " + o_tok);
+        ASSERT_EQ(del, std::string("OK"));
+        ASSERT_TRUE(cmd(fd, "LIST_MEMBERS " + gid).substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("DELETE_GROUP rejects non-owner");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto other = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string other_tok = extract_token(
+            cmd(fd, "REGISTER " + other.user_id + " " + Botan::hex_encode(other.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        ASSERT_TRUE(
+            cmd(fd, "DELETE_GROUP " + gid + " " + other.user_id + " " + other_tok).substr(0, 3) ==
+            "ERR");
+        close(fd);
+    }
+
+    TEST("LEAVE_GROUP removes the member");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto member = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string m_tok = extract_token(
+            cmd(fd, "REGISTER " + member.user_id + " " + Botan::hex_encode(member.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
+        ASSERT_EQ(cmd(fd, "LEAVE_GROUP " + gid + " " + member.user_id + " " + m_tok),
+                  std::string("OK"));
+        std::string list = cmd(fd, "LIST_MEMBERS " + gid);
+        ASSERT_TRUE(list.find(member.user_id) == std::string::npos);
+        close(fd);
+    }
+
+    TEST("LEAVE_GROUP rejects non-member");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto outsider = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string out_tok = extract_token(cmd(fd, "REGISTER " + outsider.user_id + " " +
+                                                        Botan::hex_encode(outsider.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        ASSERT_TRUE(
+            cmd(fd, "LEAVE_GROUP " + gid + " " + outsider.user_id + " " + out_tok).substr(0, 3) ==
+            "ERR");
+        close(fd);
+    }
+
+    TEST("TRANSFER_GROUP changes owner to a current member");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto member = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        cmd(fd, "REGISTER " + member.user_id + " " + Botan::hex_encode(member.pubkey_bytes));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
+        ASSERT_EQ(cmd(fd, "TRANSFER_GROUP " + gid + " " + owner.user_id + " " + o_tok + " " +
+                              member.user_id),
+                  std::string("OK"));
+        // Old owner can no longer delete (no longer owner)
+        ASSERT_TRUE(
+            cmd(fd, "DELETE_GROUP " + gid + " " + owner.user_id + " " + o_tok).substr(0, 3) ==
+            "ERR");
+        close(fd);
+    }
+
+    TEST("TRANSFER_GROUP rejects transferring to a non-member");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto outsider = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string o_tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        cmd(fd, "REGISTER " + outsider.user_id + " " + Botan::hex_encode(outsider.pubkey_bytes));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " G").substr(3);
+        ASSERT_TRUE(cmd(fd, "TRANSFER_GROUP " + gid + " " + owner.user_id + " " + o_tok + " " +
+                                outsider.user_id)
+                        .substr(0, 3) == "ERR");
         close(fd);
     }
 
