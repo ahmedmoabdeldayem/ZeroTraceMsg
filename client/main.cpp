@@ -12,6 +12,7 @@
 #include <atomic>
 #include <botan/aead.h>
 #include <botan/auto_rng.h>
+#include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/secmem.h>
 #include <botan/x509cert.h>
@@ -391,6 +392,40 @@ static bool do_register(int fd)
 // Send an encrypted message to recipient
 // -------------------------------------------------------
 // Send one encrypted message to a single target_id (may be primary or a linked device).
+// Format 32 raw bytes as a safety number: 12 groups of 5 decimal digits.
+// Each group encodes 2.5 bytes (20 bits) from the hash, giving ~60 bits of visual entropy.
+static std::string format_safety_number(const std::vector<uint8_t>& hash32)
+{
+    std::string result;
+    for (int i = 0; i < 12; ++i) {
+        // Read 3 bytes (24 bits), use top 20 bits → value 0–999999, display as 5-digit group.
+        int off = i * 2; // stride of 2 bytes for 12 groups from 32 bytes
+        if (off + 2 >= static_cast<int>(hash32.size()))
+            off = static_cast<int>(hash32.size()) - 3;
+        uint32_t v = (static_cast<uint32_t>(hash32[static_cast<size_t>(off)]) << 16) |
+                     (static_cast<uint32_t>(hash32[static_cast<size_t>(off) + 1]) << 8) |
+                     static_cast<uint32_t>(hash32[static_cast<size_t>(off) + 2]);
+        v = (v >> 4) % 100000; // top 20 bits mod 100000 → 5 digits
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%05u", v);
+        if (i > 0)
+            result += ' ';
+        result += buf;
+    }
+    return result;
+}
+
+// Fetch the SHA-256 fingerprint of a user_id from the server (via GETFINGERPRINT).
+// Returns empty string on failure.
+static std::string fetch_fingerprint(int fd, const std::string& user_id)
+{
+    send_line(fd, "GETFINGERPRINT " + user_id);
+    std::string resp = read_line(fd);
+    if (resp.size() > 3 && resp.substr(0, 3) == "OK ")
+        return resp.substr(3);
+    return "";
+}
+
 static void send_to_one(int fd, const std::string& target_id, const std::string& text)
 {
     std::vector<uint8_t> encrypt_pub;
@@ -938,6 +973,62 @@ int main(int argc, char* argv[])
             ss >> id >> nick;
             if (id.size() == USER_ID_LEN && !nick.empty()) {
                 add_contact(id, nick);
+            }
+        } else if (first == "/fingerprint") {
+            // Show own identity fingerprint (SHA-256 of public key as safety number).
+            auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+            sha->update(identity.pubkey_bytes);
+            auto digest = sha->final();
+            std::vector<uint8_t> dv(digest.begin(), digest.end());
+            std::cout << "\n[your fingerprint]\n  id:  " << identity.user_id
+                      << "\n  key: " << format_safety_number(dv) << "\n";
+        } else if (first == "/verify") {
+            // /verify <nickname_or_id>
+            // Fetches the other party's fingerprint and displays both side-by-side
+            // so users can compare them out-of-band to detect MITM.
+            std::string target;
+            ss >> target;
+            std::string resolved = resolve_id(target);
+            if (resolved.empty()) {
+                std::cout << "\n[unknown contact: " << target << "]\n";
+            } else {
+                std::string fp_hex;
+                {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    fp_hex = fetch_fingerprint(fd, resolved);
+                }
+                if (fp_hex.empty()) {
+                    std::cout << "\n[failed to fetch fingerprint for " << resolved << "]\n";
+                } else {
+                    auto remote_bytes = Botan::hex_decode(fp_hex);
+                    std::vector<uint8_t> remote_v(remote_bytes.begin(), remote_bytes.end());
+
+                    auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+                    sha->update(identity.pubkey_bytes);
+                    auto own_digest = sha->final();
+                    std::vector<uint8_t> own_v(own_digest.begin(), own_digest.end());
+
+                    // Safety number = hash of (sorted) both fingerprints concatenated.
+                    // Sort by user_id so both parties compute the same number.
+                    std::vector<uint8_t> combined;
+                    const std::string& a = identity.user_id;
+                    const std::string& b = resolved;
+                    const auto& first_fp = (a < b) ? own_v : remote_v;
+                    const auto& second_fp = (a < b) ? remote_v : own_v;
+                    combined.insert(combined.end(), first_fp.begin(), first_fp.end());
+                    combined.insert(combined.end(), second_fp.begin(), second_fp.end());
+
+                    auto sha2 = Botan::HashFunction::create_or_throw("SHA-256");
+                    sha2->update(combined);
+                    auto safety = sha2->final();
+                    std::vector<uint8_t> safety_v(safety.begin(), safety.end());
+
+                    std::cout << "\n[safety number with " << target << " (" << resolved << ")]\n"
+                              << "  " << format_safety_number(safety_v) << "\n"
+                              << "\nCompare this number with " << target
+                              << " over a trusted channel.\n"
+                              << "If it matches on both sides, your conversation is secure.\n";
+                }
             }
         } else if (first == "/group") {
             // /group create <name>

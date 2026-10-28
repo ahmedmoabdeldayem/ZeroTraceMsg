@@ -243,6 +243,23 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 sl("OK " + Botan::hex_encode(*key));
             }
 
+        } else if (cmd == "GETFINGERPRINT") {
+            // GETFINGERPRINT <user_id>
+            // Returns SHA-256(pubkey_bytes) as hex. No auth required — public information.
+            // Clients use this to compute and display safety numbers for out-of-band
+            // identity verification.
+            std::string user_id;
+            ss >> user_id;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            auto key = get_store().get_pubkey(user_id);
+            if (!key.has_value()) {
+                sl("ERR unknown user");
+            } else {
+                auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+                sha->update(*key);
+                sl("OK " + Botan::hex_encode(sha->final()));
+            }
+
         } else if (cmd == "GETPREKEY") {
             // Returns the user's identity pubkey and one popped one-time prekey (if available).
             // Response: OK <identity_pubkey_hex> <prekey_id> <prekey_pubkey_hex>

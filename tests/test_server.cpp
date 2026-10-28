@@ -1526,6 +1526,35 @@ int main()
     }
 
     // -------------------------------------------------------
+    // Key fingerprint verification (GETFINGERPRINT)
+    // -------------------------------------------------------
+
+    TEST("GETFINGERPRINT returns 64-hex SHA-256 of registered pubkey");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp = cmd(fd, "GETFINGERPRINT " + id.user_id);
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string fp = resp.substr(3);
+        ASSERT_EQ(fp.size(), (size_t)64); // 32 bytes SHA-256 → 64 hex chars
+        // Verify it's actually SHA-256(pubkey)
+        auto sha = Botan::HashFunction::create_or_throw("SHA-256");
+        sha->update(id.pubkey_bytes);
+        ASSERT_EQ(fp, Botan::hex_encode(sha->final()));
+        close(fd);
+    }
+
+    TEST("GETFINGERPRINT returns ERR for unknown user");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        ASSERT_TRUE(cmd(fd, "GETFINGERPRINT 0000000000000000").substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
     // Session refresh (REFRESH_TOKEN)
     // -------------------------------------------------------
 
