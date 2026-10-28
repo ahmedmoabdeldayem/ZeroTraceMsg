@@ -41,6 +41,9 @@ struct Config {
     int prekey_refill_threshold = 5;
     // Max messages returned per POLL. 0 = unlimited (legacy behaviour).
     int poll_page_size = 0;
+    // Refresh session token when fewer than this many hours remain before TTL expiry.
+    // 0 = never auto-refresh (only matters when session_ttl_hours > 0).
+    int session_refresh_hours = 2;
     // Maximum members per group. 0 = unlimited.
     int max_group_members = 50;
     // Maximum groups a user can own. 0 = unlimited.

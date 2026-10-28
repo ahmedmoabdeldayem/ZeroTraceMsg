@@ -108,6 +108,7 @@ static Identity identity;
 static std::atomic<int> sock_fd{-1};
 static std::string username_local;                      // chosen username, sealed in messages
 static std::string session_token;                       // issued by server on REGISTER
+static std::atomic<int64_t> session_created_at{0};      // unix timestamp of last REGISTER/REFRESH
 static std::map<std::string, PrekeyPair> prekey_store;  // prekey_id → private key pair
 static std::string prekeys_file;                        // path to persisted prekey private keys
 static std::atomic<int64_t> sent_at{0};                 // timestamp of last send
@@ -374,6 +375,7 @@ static bool do_register(int fd)
     if (resp.substr(0, 3) == "OK ") {
         std::istringstream ss(resp.substr(3));
         ss >> session_token; // first word is the token
+        session_created_at.store(now_unix());
         // remaining words are key=value crypto params
         std::string rest;
         std::getline(ss >> std::ws, rest);
@@ -584,6 +586,21 @@ static void poll_thread(std::string server_ip)
                         for (auto& pk : new_pks)
                             prekey_store[pk.prekey_id] = std::move(pk);
                         save_prekeys_to_file();
+                    }
+                }
+            }
+
+            // Session auto-refresh: when TTL is configured and fewer than
+            // session_refresh_hours remain, request a new token proactively.
+            if (g_cfg.session_ttl_hours > 0 && g_cfg.session_refresh_hours > 0) {
+                int64_t age_h = (now_unix() - session_created_at.load()) / 3600;
+                int64_t remaining_h = g_cfg.session_ttl_hours - age_h;
+                if (remaining_h <= g_cfg.session_refresh_hours) {
+                    send_line(fd, "REFRESH_TOKEN " + identity.user_id + " " + session_token);
+                    std::string ref = read_line(fd);
+                    if (ref.size() > 3 && ref.substr(0, 3) == "OK ") {
+                        session_token = ref.substr(3);
+                        session_created_at.store(now_unix());
                     }
                 }
             }
@@ -989,6 +1006,39 @@ int main(int argc, char* argv[])
                         if (m != identity.user_id)
                             send_to_one(fd, m, text);
                     sent_at.store(now_unix());
+                }
+            } else if (sub == "delete") {
+                std::string gid;
+                ss >> gid;
+                if (gid.empty()) {
+                    std::cout << "\n[usage: /group delete <group_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd,
+                              "DELETE_GROUP " + gid + " " + identity.user_id + " " + session_token);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
+            } else if (sub == "leave") {
+                std::string gid;
+                ss >> gid;
+                if (gid.empty()) {
+                    std::cout << "\n[usage: /group leave <group_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd,
+                              "LEAVE_GROUP " + gid + " " + identity.user_id + " " + session_token);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
+                }
+            } else if (sub == "transfer") {
+                std::string gid, new_owner;
+                ss >> gid >> new_owner;
+                if (gid.empty() || new_owner.empty()) {
+                    std::cout << "\n[usage: /group transfer <group_id> <new_owner_id>]\n";
+                } else {
+                    std::lock_guard<std::mutex> lock(socket_mutex);
+                    send_line(fd, "TRANSFER_GROUP " + gid + " " + identity.user_id + " " +
+                                      session_token + " " + new_owner);
+                    std::cout << "\n[" << read_line(fd) << "]\n";
                 }
             }
         } else {
