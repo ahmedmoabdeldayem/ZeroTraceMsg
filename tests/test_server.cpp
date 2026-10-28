@@ -9,6 +9,7 @@
 #include "test_runner.hpp"
 #include <arpa/inet.h>
 #include <botan/auto_rng.h>
+#include <botan/hash.h>
 #include <botan/hex.h>
 #include <botan/tls_session_manager_noop.h>
 #include <chrono>
