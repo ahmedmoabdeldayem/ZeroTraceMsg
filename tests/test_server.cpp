@@ -1525,6 +1525,42 @@ int main()
         close(fd);
     }
 
+    // -------------------------------------------------------
+    // Session refresh (REFRESH_TOKEN)
+    // -------------------------------------------------------
+
+    TEST("REFRESH_TOKEN issues a new token; old token no longer works");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string old_tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+
+        std::string resp = cmd(fd, "REFRESH_TOKEN " + id.user_id + " " + old_tok);
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string new_tok = resp.substr(3);
+        ASSERT_EQ(new_tok.size(), (size_t)64);
+        ASSERT_TRUE(new_tok != old_tok);
+        // Old token rejected; new token accepted
+        ASSERT_TRUE(cmd(fd, "POLL " + id.user_id + " " + old_tok).substr(0, 3) == "ERR");
+        ASSERT_TRUE(cmd(fd, "POLL " + id.user_id + " " + new_tok).find("NOMSG") !=
+                    std::string::npos);
+        close(fd);
+    }
+
+    TEST("REFRESH_TOKEN rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        ASSERT_TRUE(
+            cmd(fd, "REFRESH_TOKEN " + id.user_id + " " + std::string(64, '0')).substr(0, 3) ==
+            "ERR");
+        close(fd);
+    }
+
     TEST("PREKEY_COUNT returns current server-side prekey count");
     {
         reset_server_state();

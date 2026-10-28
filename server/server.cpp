@@ -284,6 +284,29 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             }
             sl("OK " + std::to_string(s.prekey_count(user_id)));
 
+        } else if (cmd == "REFRESH_TOKEN") {
+            // REFRESH_TOKEN <user_id> <old_token>
+            // Issues a new session token, resetting the session TTL clock.
+            // Lets long-running clients stay authenticated without re-registering.
+            std::string user_id, token;
+            ss >> user_id >> token;
+            std::lock_guard<std::mutex> lock(store_mutex);
+            Store& s = get_store();
+
+            auto sess = s.get_session(user_id);
+            bool token_ok =
+                sess.has_value() && sess->token.size() == token.size() &&
+                ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                         reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+            if (!token_ok) {
+                sl("ERR invalid token");
+                continue;
+            }
+            std::string new_token = Botan::hex_encode(rng.random_vec(32));
+            s.put_session(user_id, new_token, now_unix());
+            sl("OK " + new_token);
+            LOG_INFO("[REFRESH_TOKEN] user=" + user_id);
+
         } else if (cmd == "UPLOAD_PREKEYS") {
             // UPLOAD_PREKEYS <user_id> <token> <pk1_hex> [<pk2_hex> ...]
             // Stores one-time prekey public keys for the authenticated user.
