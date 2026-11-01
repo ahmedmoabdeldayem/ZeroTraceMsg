@@ -200,6 +200,13 @@ int main()
         ASSERT_THROWS(c.validate());
     }
 
+    TEST("validation rejects shutdown_timeout_s = 0");
+    {
+        Config c;
+        c.shutdown_timeout_s = 0;
+        ASSERT_THROWS(c.validate());
+    }
+
     TEST("validation rejects max_connections = -1");
     {
         Config c;
@@ -538,6 +545,7 @@ int main()
                                "session_refresh_hours   = 2\n"
                                "max_group_members       = 10\n"
                                "max_groups_per_user     = 5\n"
+                               "shutdown_timeout_s      = 10\n"
                                "[client]\n"
                                "server                  = 10.0.0.1\n"
                                "port                    = 8888\n"
@@ -583,6 +591,7 @@ int main()
         ASSERT_EQ(c.session_refresh_hours, 2);
         ASSERT_EQ(c.max_group_members, 10);
         ASSERT_EQ(c.max_groups_per_user, 5);
+        ASSERT_EQ(c.shutdown_timeout_s, 10);
         ASSERT_EQ(c.client_server, std::string("10.0.0.1"));
         ASSERT_EQ(c.client_port, 8888);
         ASSERT_EQ(c.msg_ttl_s, 60);

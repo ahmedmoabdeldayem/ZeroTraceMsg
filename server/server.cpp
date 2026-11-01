@@ -28,6 +28,7 @@
 #include <mutex>
 #include <netinet/in.h>
 #include <poll.h>
+#include <set>
 #include <signal.h>
 #include <sstream>
 #include <string>
@@ -110,6 +111,10 @@ static std::atomic<int64_t> g_messages_sent_total{0};
 static std::atomic<int64_t> g_rate_limit_hits_total{0};
 static int64_t g_start_time = 0;
 static std::string g_config_path;
+
+// Tracks every active client FD so shutdown can unblock their recv() calls.
+static std::set<int> g_active_fds;
+static std::mutex g_fds_mutex;
 
 static void handle_signal(int sig)
 {
@@ -1458,10 +1463,20 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
             continue;
 
         g_active_connections.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> lk(g_fds_mutex);
+            g_active_fds.insert(cfd);
+        }
         pool.submit([cfd, creds, policy, cfg]() {
             struct Guard {
-                ~Guard() { g_active_connections.fetch_sub(1); }
-            } guard;
+                int fd;
+                ~Guard()
+                {
+                    g_active_connections.fetch_sub(1);
+                    std::lock_guard<std::mutex> lk(g_fds_mutex);
+                    g_active_fds.erase(fd);
+                }
+            } guard{cfd};
             auto rng_ptr = std::make_shared<Botan::AutoSeeded_RNG>();
             auto cb = std::make_shared<SocketTlsCallbacks>(cfd);
             auto sess_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
@@ -1474,8 +1489,30 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
         });
     }
 
+    close(server_fd); // stop accepting new connections immediately
+
+    // Drain: wait for in-flight connections to finish naturally.
+    LOG_INFO("[*] Shutdown: waiting up to " + std::to_string(cfg.shutdown_timeout_s) + "s for " +
+             std::to_string(g_active_connections.load()) + " connection(s) to drain.");
+    for (int waited = 0; g_active_connections.load() > 0 && waited < cfg.shutdown_timeout_s;
+         ++waited)
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Force-close any connections that outlasted the timeout.
+    {
+        std::lock_guard<std::mutex> lk(g_fds_mutex);
+        if (!g_active_fds.empty()) {
+            LOG_WARN("[*] Shutdown timeout — force-closing " + std::to_string(g_active_fds.size()) +
+                     " connection(s).");
+            for (int fd : g_active_fds)
+                ::shutdown(fd, SHUT_RDWR);
+        }
+    }
+
+    // Wait for worker threads to finish processing the now-unblocked connections.
+    // ThreadPool::~ThreadPool() joins all workers, so pool going out of scope here
+    // provides the final synchronisation point.
     LOG_INFO("[*] Server shut down gracefully.");
-    close(server_fd);
 }
 
 void reset_server_state()
@@ -1487,3 +1524,6 @@ void reset_server_state()
         g_store = std::make_unique<Store>("");
     }
 }
+
+void trigger_shutdown_for_test() { g_shutdown.store(true); }
+void reset_shutdown_for_test() { g_shutdown.store(false); }

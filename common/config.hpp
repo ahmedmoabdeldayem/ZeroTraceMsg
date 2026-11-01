@@ -48,6 +48,9 @@ struct Config {
     int max_group_members = 50;
     // Maximum groups a user can own. 0 = unlimited.
     int max_groups_per_user = 10;
+    // Seconds to wait for in-flight connections to drain on SIGTERM/SIGINT before
+    // force-closing them. Must be >= 1.
+    int shutdown_timeout_s = 30;
 
     // ── [client] ────────────────────────────────────────────────────────
     std::string client_server = "127.0.0.1";
