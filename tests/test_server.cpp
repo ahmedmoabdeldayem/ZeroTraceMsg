@@ -47,6 +47,8 @@ static const int TEST_IPV6_LOOPBACK_PORT = 59985;
 static const int TEST_DEVICE_LIMIT_PORT = 59984;
 // TLS server with max_group_members=1 (covers group-full path)
 static const int TEST_GROUP_LIMIT_PORT = 59983;
+// TLS server with shutdown_timeout_s=1 (covers graceful shutdown drain path)
+static const int TEST_SHUTDOWN_PORT = 59982;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -392,6 +394,16 @@ int main()
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_grplimit.cert.pem";
         cfg.key_path = "/tmp/ztm_grplimit.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_SHUTDOWN_PORT;
+        cfg.shutdown_timeout_s = 1;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_shutdown.cert.pem";
+        cfg.key_path = "/tmp/ztm_shutdown.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -2635,6 +2647,31 @@ int main()
                                              " " + user2.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(conn.fd);
+    }
+
+    // -------------------------------------------------------
+    // Graceful shutdown — drain and force-close
+    // -------------------------------------------------------
+
+    TEST("graceful shutdown: force-closes held-open connection within timeout");
+    {
+        // Open a connection and hold it open without closing it.
+        auto conn = tls_connect(TEST_SHUTDOWN_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        tls_cmd(conn, "HELLO ZTM/1");
+
+        // Trigger shutdown. The server will wait shutdown_timeout_s=1 second for
+        // the connection to drain, then call shutdown(fd, SHUT_RDWR) on it.
+        trigger_shutdown_for_test();
+
+        // The server-side force-close should unblock our recv() within ~2 seconds.
+        // tls_read_line returns "" on recv() <= 0, so we'll see an empty response.
+        std::string line = tls_read_line(conn.fd, *conn.tls, *conn.cb);
+        ASSERT_TRUE(line.empty());
+        close(conn.fd);
+
+        // Restore global shutdown flag so remaining test servers continue.
+        reset_shutdown_for_test();
     }
 
     SUITE_RESULTS();

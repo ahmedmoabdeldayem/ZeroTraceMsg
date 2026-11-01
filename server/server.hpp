@@ -10,3 +10,7 @@ void start_server_tls(const Config& cfg, const std::string& config_path = "zerot
 
 // Clear all server state — for tests only.
 void reset_server_state();
+
+// Trigger and then reset the shutdown flag — for tests only.
+void trigger_shutdown_for_test();
+void reset_shutdown_for_test();
