@@ -200,6 +200,90 @@ int main()
         ASSERT_THROWS(c.validate());
     }
 
+    TEST("validation rejects max_connections = -1");
+    {
+        Config c;
+        c.max_connections = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects admin_port = -1");
+    {
+        Config c;
+        c.admin_port = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects metrics_port = -1");
+    {
+        Config c;
+        c.metrics_port = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects max_prekeys_per_user = -1");
+    {
+        Config c;
+        c.max_prekeys_per_user = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects prekey_batch_size = 0");
+    {
+        Config c;
+        c.prekey_batch_size = 0;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects max_devices_per_user = -1");
+    {
+        Config c;
+        c.max_devices_per_user = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects worker_threads = -1");
+    {
+        Config c;
+        c.worker_threads = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects prekey_refill_threshold = -1");
+    {
+        Config c;
+        c.prekey_refill_threshold = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects poll_page_size = -1");
+    {
+        Config c;
+        c.poll_page_size = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects session_refresh_hours = -1");
+    {
+        Config c;
+        c.session_refresh_hours = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects max_group_members = -1");
+    {
+        Config c;
+        c.max_group_members = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects max_groups_per_user = -1");
+    {
+        Config c;
+        c.max_groups_per_user = -1;
+        ASSERT_THROWS(c.validate());
+    }
+
     TEST("validation rejects tls_min_version = 1.1");
     {
         Config c;
@@ -433,17 +517,27 @@ int main()
     TEST("load: every key in every section is parsed");
     {
         auto path = write_conf("[server]\n"
-                               "port                 = 9999\n"
-                               "bind_address         = 127.0.0.1\n"
-                               "max_users            = 50\n"
-                               "max_inbox_messages   = 25\n"
-                               "session_ttl_hours    = 12\n"
-                               "msg_ttl_hours        = 24\n"
-                               "cleanup_interval_min = 5\n"
-                               "rate_limit_msgs      = 10\n"
-                               "rate_limit_window_s  = 30\n"
-                               "cert_path            = /tmp/ztm_srv.cert.pem\n"
-                               "key_path             = /tmp/ztm_srv.key.pem\n"
+                               "port                    = 9999\n"
+                               "bind_address            = 127.0.0.1\n"
+                               "max_users               = 50\n"
+                               "max_connections         = 5\n"
+                               "max_inbox_messages      = 25\n"
+                               "session_ttl_hours       = 12\n"
+                               "msg_ttl_hours           = 24\n"
+                               "cleanup_interval_min    = 5\n"
+                               "rate_limit_msgs         = 10\n"
+                               "rate_limit_window_s     = 30\n"
+                               "cert_path               = /tmp/ztm_srv.cert.pem\n"
+                               "key_path                = /tmp/ztm_srv.key.pem\n"
+                               "max_prekeys_per_user    = 10\n"
+                               "prekey_batch_size       = 5\n"
+                               "max_devices_per_user    = 3\n"
+                               "worker_threads          = 4\n"
+                               "prekey_refill_threshold = 2\n"
+                               "poll_page_size          = 50\n"
+                               "session_refresh_hours   = 2\n"
+                               "max_group_members       = 10\n"
+                               "max_groups_per_user     = 5\n"
                                "[client]\n"
                                "server                  = 10.0.0.1\n"
                                "port                    = 8888\n"
@@ -472,6 +566,7 @@ int main()
                                "format = json\n");
         auto c = Config::load(path);
         ASSERT_EQ(c.server_bind, std::string("127.0.0.1"));
+        ASSERT_EQ(c.max_connections, 5);
         ASSERT_EQ(c.max_inbox_messages, 25);
         ASSERT_EQ(c.session_ttl_hours, 12);
         ASSERT_EQ(c.msg_ttl_hours, 24);
@@ -479,6 +574,15 @@ int main()
         ASSERT_EQ(c.rate_limit_window_s, 30);
         ASSERT_EQ(c.cert_path, std::string("/tmp/ztm_srv.cert.pem"));
         ASSERT_EQ(c.key_path, std::string("/tmp/ztm_srv.key.pem"));
+        ASSERT_EQ(c.max_prekeys_per_user, 10);
+        ASSERT_EQ(c.prekey_batch_size, 5);
+        ASSERT_EQ(c.max_devices_per_user, 3);
+        ASSERT_EQ(c.worker_threads, 4);
+        ASSERT_EQ(c.prekey_refill_threshold, 2);
+        ASSERT_EQ(c.poll_page_size, 50);
+        ASSERT_EQ(c.session_refresh_hours, 2);
+        ASSERT_EQ(c.max_group_members, 10);
+        ASSERT_EQ(c.max_groups_per_user, 5);
         ASSERT_EQ(c.client_server, std::string("10.0.0.1"));
         ASSERT_EQ(c.client_port, 8888);
         ASSERT_EQ(c.msg_ttl_s, 60);
