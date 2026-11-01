@@ -381,36 +381,40 @@ int main()
         Config cfg;
         cfg.server_port = TEST_DEVICE_LIMIT_PORT;
         cfg.max_devices_per_user = 1;
-        cfg.admin_port = 0; cfg.metrics_port = 0;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_devlimit.cert.pem";
-        cfg.key_path  = "/tmp/ztm_devlimit.key.pem";
+        cfg.key_path = "/tmp/ztm_devlimit.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::thread([] {
         Config cfg;
         cfg.server_port = TEST_GROUP_LIMIT_PORT;
         cfg.max_group_members = 1;
-        cfg.admin_port = 0; cfg.metrics_port = 0;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_grplimit.cert.pem";
-        cfg.key_path  = "/tmp/ztm_grplimit.key.pem";
+        cfg.key_path = "/tmp/ztm_grplimit.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::thread([] {
         Config cfg;
         cfg.server_port = TEST_LOG_WARN_PORT;
         cfg.log_level = "warn";
-        cfg.admin_port = 0; cfg.metrics_port = 0;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_logwarn.cert.pem";
-        cfg.key_path  = "/tmp/ztm_logwarn.key.pem";
+        cfg.key_path = "/tmp/ztm_logwarn.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::thread([] {
         Config cfg;
         cfg.server_port = TEST_LOG_ERROR_PORT;
         cfg.log_level = "error";
-        cfg.admin_port = 0; cfg.metrics_port = 0;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_logerr.cert.pem";
-        cfg.key_path  = "/tmp/ztm_logerr.key.pem";
+        cfg.key_path = "/tmp/ztm_logerr.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -2410,7 +2414,8 @@ int main()
         int fd = connect_test();
         cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         // Try registering same user_id but with id2's pubkey
-        std::string resp = cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id2.pubkey_bytes));
+        std::string resp =
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id2.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2435,15 +2440,15 @@ int main()
     {
         reset_server_state();
         auto primary = generate_identity(rng, g_cfg);
-        auto device  = generate_identity(rng, g_cfg);
+        auto device = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string p_tok = extract_token(
             cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
         cmd(fd, "REGISTER " + device.user_id + " " + Botan::hex_encode(device.pubkey_bytes));
         cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
         auto new_id = generate_identity(rng, g_cfg);
-        std::string resp = cmd(fd, "REKEY " + primary.user_id + " " + p_tok + " " +
-                                       new_id.user_id + " " + Botan::hex_encode(new_id.pubkey_bytes));
+        std::string resp = cmd(fd, "REKEY " + primary.user_id + " " + p_tok + " " + new_id.user_id +
+                                       " " + Botan::hex_encode(new_id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
         // Device should now be linked to new identity
         std::string linked = cmd(fd, "GETLINKED " + new_id.user_id);
@@ -2459,14 +2464,14 @@ int main()
     {
         reset_server_state();
         auto primary = generate_identity(rng, g_cfg);
-        auto device  = generate_identity(rng, g_cfg);
+        auto device = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string tok = extract_token(
             cmd(fd, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
         cmd(fd, "REGISTER " + device.user_id + " " + Botan::hex_encode(device.pubkey_bytes));
         cmd(fd, "LINK_DEVICE " + primary.user_id + " " + tok + " " + device.user_id);
-        std::string resp = cmd(fd, "UNLINK_DEVICE " + primary.user_id + " " +
-                                       std::string(64, '0') + " " + device.user_id);
+        std::string resp = cmd(fd, "UNLINK_DEVICE " + primary.user_id + " " + std::string(64, '0') +
+                                       " " + device.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2479,7 +2484,7 @@ int main()
     {
         reset_server_state();
         auto owner = generate_identity(rng, g_cfg);
-        auto user  = generate_identity(rng, g_cfg);
+        auto user = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string o_tok = extract_token(
             cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
@@ -2489,8 +2494,8 @@ int main()
         std::string gid = cr.size() > 3 ? cr.substr(3) : "";
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + user.user_id);
         // user tries REMOVE_MEMBER (not owner)
-        std::string resp = cmd(fd, "REMOVE_MEMBER " + gid + " " + user.user_id + " " +
-                                       u_tok + " " + user.user_id);
+        std::string resp =
+            cmd(fd, "REMOVE_MEMBER " + gid + " " + user.user_id + " " + u_tok + " " + user.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2506,8 +2511,8 @@ int main()
         int fd = connect_test();
         std::string tok = extract_token(
             cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
-        std::string resp = cmd(fd, "DELETE_GROUP " + std::string(16, '0') + " " +
-                                       owner.user_id + " " + tok);
+        std::string resp =
+            cmd(fd, "DELETE_GROUP " + std::string(16, '0') + " " + owner.user_id + " " + tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2523,8 +2528,8 @@ int main()
         int fd = connect_test();
         std::string tok = extract_token(
             cmd(fd, "REGISTER " + user.user_id + " " + Botan::hex_encode(user.pubkey_bytes)));
-        std::string resp = cmd(fd, "LEAVE_GROUP " + std::string(16, '0') + " " +
-                                       user.user_id + " " + tok);
+        std::string resp =
+            cmd(fd, "LEAVE_GROUP " + std::string(16, '0') + " " + user.user_id + " " + tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2533,7 +2538,7 @@ int main()
     {
         reset_server_state();
         auto owner = generate_identity(rng, g_cfg);
-        auto user  = generate_identity(rng, g_cfg);
+        auto user = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string o_tok = extract_token(
             cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
@@ -2541,8 +2546,8 @@ int main()
         std::string cr = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + o_tok + " grp");
         std::string gid = cr.size() > 3 ? cr.substr(3) : "";
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + user.user_id);
-        std::string resp = cmd(fd, "LEAVE_GROUP " + gid + " " + user.user_id + " " +
-                                       std::string(64, '0'));
+        std::string resp =
+            cmd(fd, "LEAVE_GROUP " + gid + " " + user.user_id + " " + std::string(64, '0'));
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2555,13 +2560,13 @@ int main()
     {
         reset_server_state();
         auto owner = generate_identity(rng, g_cfg);
-        auto user  = generate_identity(rng, g_cfg);
+        auto user = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string tok = extract_token(
             cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
         cmd(fd, "REGISTER " + user.user_id + " " + Botan::hex_encode(user.pubkey_bytes));
-        std::string resp = cmd(fd, "TRANSFER_GROUP " + std::string(16, '0') + " " +
-                                       owner.user_id + " " + tok + " " + user.user_id);
+        std::string resp = cmd(fd, "TRANSFER_GROUP " + std::string(16, '0') + " " + owner.user_id +
+                                       " " + tok + " " + user.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2570,7 +2575,7 @@ int main()
     {
         reset_server_state();
         auto owner = generate_identity(rng, g_cfg);
-        auto user  = generate_identity(rng, g_cfg);
+        auto user = generate_identity(rng, g_cfg);
         int fd = connect_test();
         std::string o_tok = extract_token(
             cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
@@ -2580,8 +2585,8 @@ int main()
         std::string gid = cr.size() > 3 ? cr.substr(3) : "";
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + user.user_id);
         // user tries to transfer the group they don't own
-        std::string resp = cmd(fd, "TRANSFER_GROUP " + gid + " " + user.user_id + " " +
-                                       u_tok + " " + owner.user_id);
+        std::string resp = cmd(fd, "TRANSFER_GROUP " + gid + " " + user.user_id + " " + u_tok +
+                                       " " + owner.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2601,7 +2606,8 @@ int main()
         // drain response
         while (true) {
             std::string line = read_line(fd);
-            if (line == "NOMSG" || line.empty()) break;
+            if (line == "NOMSG" || line.empty())
+                break;
         }
         close(fd);
     }
@@ -2614,17 +2620,17 @@ int main()
     {
         reset_server_state();
         auto primary = generate_identity(rng, g_cfg);
-        auto dev1    = generate_identity(rng, g_cfg);
-        auto dev2    = generate_identity(rng, g_cfg);
-        auto conn    = tls_connect(TEST_DEVICE_LIMIT_PORT);
+        auto dev1 = generate_identity(rng, g_cfg);
+        auto dev2 = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_DEVICE_LIMIT_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        std::string p_tok = extract_token(tls_cmd(conn,
-            "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
+        std::string p_tok = extract_token(tls_cmd(
+            conn, "REGISTER " + primary.user_id + " " + Botan::hex_encode(primary.pubkey_bytes)));
         tls_cmd(conn, "REGISTER " + dev1.user_id + " " + Botan::hex_encode(dev1.pubkey_bytes));
         tls_cmd(conn, "REGISTER " + dev2.user_id + " " + Botan::hex_encode(dev2.pubkey_bytes));
         tls_cmd(conn, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + dev1.user_id);
-        std::string resp = tls_cmd(conn, "LINK_DEVICE " + primary.user_id + " " + p_tok +
-                                             " " + dev2.user_id);
+        std::string resp =
+            tls_cmd(conn, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + dev2.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(conn.fd);
     }
@@ -2639,17 +2645,17 @@ int main()
         auto owner = generate_identity(rng, g_cfg);
         auto user1 = generate_identity(rng, g_cfg);
         auto user2 = generate_identity(rng, g_cfg);
-        auto conn  = tls_connect(TEST_GROUP_LIMIT_PORT);
+        auto conn = tls_connect(TEST_GROUP_LIMIT_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        std::string tok = extract_token(tls_cmd(conn,
-            "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string tok = extract_token(tls_cmd(conn, "REGISTER " + owner.user_id + " " +
+                                                          Botan::hex_encode(owner.pubkey_bytes)));
         tls_cmd(conn, "REGISTER " + user1.user_id + " " + Botan::hex_encode(user1.pubkey_bytes));
         tls_cmd(conn, "REGISTER " + user2.user_id + " " + Botan::hex_encode(user2.pubkey_bytes));
         std::string cr = tls_cmd(conn, "CREATE_GROUP " + owner.user_id + " " + tok + " fullgrp");
         std::string gid = cr.size() > 3 ? cr.substr(3) : "";
         tls_cmd(conn, "ADD_MEMBER " + gid + " " + owner.user_id + " " + tok + " " + user1.user_id);
-        std::string resp = tls_cmd(conn, "ADD_MEMBER " + gid + " " + owner.user_id + " " +
-                                             tok + " " + user2.user_id);
+        std::string resp = tls_cmd(conn, "ADD_MEMBER " + gid + " " + owner.user_id + " " + tok +
+                                             " " + user2.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(conn.fd);
     }
@@ -2661,11 +2667,11 @@ int main()
     TEST("log_level=warn: server starts and accepts connections");
     {
         reset_server_state();
-        auto id   = generate_identity(rng, g_cfg);
+        auto id = generate_identity(rng, g_cfg);
         auto conn = tls_connect(TEST_LOG_WARN_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        std::string resp = tls_cmd(conn,
-            "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp =
+            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
         close(conn.fd);
     }
@@ -2673,11 +2679,11 @@ int main()
     TEST("log_level=error: server starts and accepts connections");
     {
         reset_server_state();
-        auto id   = generate_identity(rng, g_cfg);
+        auto id = generate_identity(rng, g_cfg);
         auto conn = tls_connect(TEST_LOG_ERROR_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        std::string resp = tls_cmd(conn,
-            "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp =
+            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
         close(conn.fd);
     }
