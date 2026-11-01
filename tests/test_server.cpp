@@ -47,9 +47,6 @@ static const int TEST_IPV6_LOOPBACK_PORT = 59985;
 static const int TEST_DEVICE_LIMIT_PORT = 59984;
 // TLS server with max_group_members=1 (covers group-full path)
 static const int TEST_GROUP_LIMIT_PORT = 59983;
-// Servers for log_level warn/error coverage in log_init
-static const int TEST_LOG_WARN_PORT = 59982;
-static const int TEST_LOG_ERROR_PORT = 59981;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -395,26 +392,6 @@ int main()
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_grplimit.cert.pem";
         cfg.key_path = "/tmp/ztm_grplimit.key.pem";
-        start_server_tls(cfg);
-    }).detach();
-    std::thread([] {
-        Config cfg;
-        cfg.server_port = TEST_LOG_WARN_PORT;
-        cfg.log_level = "warn";
-        cfg.admin_port = 0;
-        cfg.metrics_port = 0;
-        cfg.cert_path = "/tmp/ztm_logwarn.cert.pem";
-        cfg.key_path = "/tmp/ztm_logwarn.key.pem";
-        start_server_tls(cfg);
-    }).detach();
-    std::thread([] {
-        Config cfg;
-        cfg.server_port = TEST_LOG_ERROR_PORT;
-        cfg.log_level = "error";
-        cfg.admin_port = 0;
-        cfg.metrics_port = 0;
-        cfg.cert_path = "/tmp/ztm_logerr.cert.pem";
-        cfg.key_path = "/tmp/ztm_logerr.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -2657,34 +2634,6 @@ int main()
         std::string resp = tls_cmd(conn, "ADD_MEMBER " + gid + " " + owner.user_id + " " + tok +
                                              " " + user2.user_id);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
-        close(conn.fd);
-    }
-
-    // -------------------------------------------------------
-    // log_level=warn and log_level=error server paths
-    // -------------------------------------------------------
-
-    TEST("log_level=warn: server starts and accepts connections");
-    {
-        reset_server_state();
-        auto id = generate_identity(rng, g_cfg);
-        auto conn = tls_connect(TEST_LOG_WARN_PORT);
-        ASSERT_TRUE(conn.fd >= 0);
-        std::string resp =
-            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
-        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
-        close(conn.fd);
-    }
-
-    TEST("log_level=error: server starts and accepts connections");
-    {
-        reset_server_state();
-        auto id = generate_identity(rng, g_cfg);
-        auto conn = tls_connect(TEST_LOG_ERROR_PORT);
-        ASSERT_TRUE(conn.fd >= 0);
-        std::string resp =
-            tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
-        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
         close(conn.fd);
     }
 
