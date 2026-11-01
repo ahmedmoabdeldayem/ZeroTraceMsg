@@ -59,6 +59,7 @@ int main()
         ASSERT_EQ(c.msg_ttl_s, 120);
         ASSERT_EQ(c.connection_timeout_s, 10);
         ASSERT_EQ(c.reconnect_on_disconnect, true);
+        ASSERT_EQ(c.max_reconnect_delay_s, 60);
     }
 
     TEST("default TLS settings");
@@ -189,6 +190,13 @@ int main()
     {
         Config c;
         c.connection_timeout_s = 0;
+        ASSERT_THROWS(c.validate());
+    }
+
+    TEST("validation rejects max_reconnect_delay_s = 0");
+    {
+        Config c;
+        c.max_reconnect_delay_s = 0;
         ASSERT_THROWS(c.validate());
     }
 
@@ -444,6 +452,7 @@ int main()
                                "identity_dir            = /tmp/ztm_ids/\n"
                                "connection_timeout_s    = 20\n"
                                "reconnect_on_disconnect = false\n"
+                               "max_reconnect_delay_s   = 30\n"
                                "[tls]\n"
                                "min_version        = 1.2\n"
                                "cert_algorithm     = ECDSA-P384\n"
@@ -475,6 +484,7 @@ int main()
         ASSERT_EQ(c.msg_ttl_s, 60);
         ASSERT_EQ(c.identity_dir, std::string("/tmp/ztm_ids/"));
         ASSERT_EQ(c.reconnect_on_disconnect, false);
+        ASSERT_EQ(c.max_reconnect_delay_s, 30);
         ASSERT_EQ(c.cert_algorithm, std::string("ECDSA-P384"));
         ASSERT_EQ(c.passphrase_kdf_memory_kb, 32768);
         ASSERT_EQ(c.passphrase_kdf_parallelism, 2);
