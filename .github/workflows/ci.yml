@@ -387,9 +387,7 @@ jobs:
     name: Update Coverage Baseline
     runs-on: ubuntu-latest
     needs: [ auto-merge, coverage ]
-    if: >
-      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
-      (github.event_name == 'push' && github.ref != 'refs/heads/main')
+    if: needs.auto-merge.result == 'success'
     permissions:
       contents: write
 
