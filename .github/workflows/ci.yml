@@ -6,9 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
-# Cancel in-progress runs for the same branch on new push.
+# Cancel in-progress runs for the same branch/event pair on new push.
+# Event name is included so push runs and pull_request runs don't cancel each other —
+# both must complete: push for fast branch feedback, pull_request for coverage-gate and auto-merge.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -197,7 +199,9 @@ jobs:
           retention-days: 1
 
   # -------------------------------------------------------
-  # Coverage gate — runs only on PRs targeting main.
+  # Coverage gate — runs on PRs targeting main, and on
+  # pushes to feature branches that have an open PR targeting
+  # main (handles repos where pull_request events don't fire).
   # Downloads the number saved by the coverage job and
   # compares it against the last known main baseline.
   # Fails if this PR would regress coverage.
@@ -206,7 +210,9 @@ jobs:
     name: Coverage Gate (vs main baseline)
     runs-on: ubuntu-latest
     needs: coverage
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: >
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref != 'refs/heads/main')
 
     steps:
       - uses: actions/checkout@v4
@@ -257,24 +263,48 @@ jobs:
     name: Auto Merge to Main
     runs-on: ubuntu-latest
     needs: [ test, sanitize, lint, coverage-gate, docker-build ]
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: >
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref != 'refs/heads/main')
     permissions:
       pull-requests: write
       contents: write
 
     steps:
-      - name: Merge PR
+      - name: Resolve PR number
+        id: pr
         run: |
-          gh pr merge "${{ github.event.pull_request.number }}" \
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "head_ref=${{ github.head_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            PR=$(gh pr list \
+              --head "${{ github.ref_name }}" \
+              --base main \
+              --state open \
+              --json number,headRefName \
+              --jq '.[0].number' \
+              --repo "${{ github.repository }}")
+            echo "number=${PR}" >> "$GITHUB_OUTPUT"
+            echo "head_ref=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge PR
+        if: steps.pr.outputs.number != ''
+        run: |
+          gh pr merge "${{ steps.pr.outputs.number }}" \
             --squash \
             --repo "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Delete head branch
+        if: steps.pr.outputs.number != ''
         run: |
           gh api --method DELETE \
-            "repos/${{ github.repository }}/git/refs/heads/${{ github.head_ref }}"
+            "repos/${{ github.repository }}/git/refs/heads/${{ steps.pr.outputs.head_ref }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -357,7 +387,9 @@ jobs:
     name: Update Coverage Baseline
     runs-on: ubuntu-latest
     needs: [ auto-merge, coverage ]
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: >
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && github.ref != 'refs/heads/main')
     permissions:
       contents: write
 
