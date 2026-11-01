@@ -6,9 +6,11 @@ on:
   pull_request:
     branches: [ main ]
 
-# Cancel in-progress runs for the same branch on new push.
+# Cancel in-progress runs for the same branch/event pair on new push.
+# Event name is included so push runs and pull_request runs don't cancel each other —
+# both must complete: push for fast branch feedback, pull_request for coverage-gate and auto-merge.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
