@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <thread>
@@ -53,12 +54,12 @@ static const int TEST_SHUTDOWN_PORT = 59982;
 // TLS server with max_connections=1 (covers connection-rejection LOG_WARN path)
 static const int TEST_MAX_CONN_PORT = 59980;
 // Ports for admin/metrics bind-failure tests (inline servers started mid-test)
-static const int TEST_ADMIN_BIND_FAIL_PORT   = 59969; // TLS main port
-static const int TEST_ADMIN_BLOCKER_PORT     = 59968; // pre-bound to block admin bind
+static const int TEST_ADMIN_BIND_FAIL_PORT = 59969;   // TLS main port
+static const int TEST_ADMIN_BLOCKER_PORT = 59968;     // pre-bound to block admin bind
 static const int TEST_METRICS_BIND_FAIL_PORT = 59967; // TLS main port
-static const int TEST_METRICS_BLOCKER_PORT   = 59966; // pre-bound to block metrics bind
+static const int TEST_METRICS_BLOCKER_PORT = 59966;   // pre-bound to block metrics bind
 // Port used for IPv6-bind-fallback test (pre-bound on IPv6 to force fallback)
-static const int TEST_IPV6_FALLBACK_PORT     = 59965;
+static const int TEST_IPV6_FALLBACK_PORT = 59965;
 
 // -------------------------------------------------------
 // TLS test helpers
