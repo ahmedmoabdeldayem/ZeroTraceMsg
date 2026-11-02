@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iostream>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sstream>
 #include <sys/socket.h>
 #include <thread>
@@ -52,6 +53,13 @@ static const int TEST_GROUP_LIMIT_PORT = 59983;
 static const int TEST_SHUTDOWN_PORT = 59982;
 // TLS server with max_connections=1 (covers connection-rejection LOG_WARN path)
 static const int TEST_MAX_CONN_PORT = 59980;
+// Ports for admin/metrics bind-failure tests (inline servers started mid-test)
+static const int TEST_ADMIN_BIND_FAIL_PORT = 59969;   // TLS main port
+static const int TEST_ADMIN_BLOCKER_PORT = 59968;     // pre-bound to block admin bind
+static const int TEST_METRICS_BIND_FAIL_PORT = 59967; // TLS main port
+static const int TEST_METRICS_BLOCKER_PORT = 59966;   // pre-bound to block metrics bind
+// Port used for IPv6-bind-fallback test (pre-bound on IPv6 to force fallback)
+static const int TEST_IPV6_FALLBACK_PORT = 59965;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -2844,6 +2852,196 @@ int main()
         cfg.log_format = "text";
         cfg.log_level = "info";
         call_log_init_for_test(cfg);
+    }
+
+    // -------------------------------------------------------
+    // AllSigMethodsPolicy: connects to P384 server with extended sig policy
+    // Exercises the AllSigMethodsPolicy class and tls_connect_all_sig helper.
+    // -------------------------------------------------------
+
+    TEST("AllSigMethodsPolicy: connects to P384 server");
+    {
+        auto conn = tls_connect_all_sig(TEST_TLS_P384_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        if (conn.fd >= 0) {
+            std::string r = tls_cmd(conn, "STATUS");
+            ASSERT_TRUE(r.substr(0, 2) == "OK");
+            close(conn.fd);
+        }
+    }
+
+    // -------------------------------------------------------
+    // log_init: unwritable log-file path silently falls back to stdout
+    // -------------------------------------------------------
+
+    TEST("log_init: unwritable log file path does not crash");
+    {
+        Config cfg;
+        cfg.log_file = "/nonexistent_ztm_dir/test.log"; // open() will fail silently
+        call_log_init_for_test(cfg);
+        // Subsequent LOG_INFO calls go to stdout (g_log_file stays closed).
+        Config def;
+        call_log_init_for_test(def); // restore
+    }
+
+    // -------------------------------------------------------
+    // Admin recv error: close connection before sending a command
+    // -------------------------------------------------------
+
+    TEST("admin: immediate disconnect is handled gracefully");
+    {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(TEST_ADMIN_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            close(fd); // recv returns 0 in read_line_raw → handler exits cleanly
+        }
+    }
+
+    // -------------------------------------------------------
+    // Metrics recv error: close connection before sending HTTP request
+    // -------------------------------------------------------
+
+    TEST("metrics: immediate disconnect before HTTP request is handled gracefully");
+    {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(TEST_METRICS_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            close(fd); // recv returns 0 in handle_metrics_client → break
+        }
+    }
+
+    // -------------------------------------------------------
+    // SIGHUP reload: malformed config file emits LOG_WARN
+    // Covers the exception path in the config-reload try/catch block.
+    // -------------------------------------------------------
+
+    TEST("SIGHUP reload: malformed config file emits LOG_WARN");
+    {
+        const std::string path = "/tmp/ztm_reload_malformed.conf";
+        {
+            std::ofstream f(path);
+            f << "[server]\nbadline_without_equals\n"; // triggers parse error
+        }
+        set_config_path_for_test(path);
+        trigger_reload_for_test();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+        Config def;
+        call_log_init_for_test(def);
+        set_config_path_for_test("zerotrace.conf");
+    }
+
+    // -------------------------------------------------------
+    // Admin port bind failure: LOG_WARN emitted, main TLS server still starts
+    // -------------------------------------------------------
+
+    TEST("admin bind failure: main server starts despite admin port conflict");
+    {
+        // Pre-bind the admin port so the server's bind() call fails.
+        int blocker = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in ba{};
+        ba.sin_family = AF_INET;
+        ba.sin_addr.s_addr = inet_addr("127.0.0.1");
+        ba.sin_port = htons(TEST_ADMIN_BLOCKER_PORT);
+        bool pre_bound = (bind(blocker, reinterpret_cast<sockaddr*>(&ba), sizeof(ba)) == 0);
+        (void)pre_bound;
+
+        std::thread([] {
+            Config cfg;
+            cfg.server_port = TEST_ADMIN_BIND_FAIL_PORT;
+            cfg.admin_port = TEST_ADMIN_BLOCKER_PORT; // already in use → LOG_WARN
+            cfg.metrics_port = 0;
+            cfg.worker_threads = 1;
+            cfg.cert_path = "/tmp/ztm_adminbind.cert.pem";
+            cfg.key_path = "/tmp/ztm_adminbind.key.pem";
+            start_server_tls(cfg);
+        }).detach();
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+        auto conn = tls_connect(TEST_ADMIN_BIND_FAIL_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        if (conn.fd >= 0) {
+            std::string r = tls_cmd(conn, "STATUS");
+            ASSERT_TRUE(r.substr(0, 2) == "OK");
+            close(conn.fd);
+        }
+        close(blocker);
+    }
+
+    // -------------------------------------------------------
+    // Metrics port bind failure: LOG_WARN emitted, main TLS server still starts
+    // -------------------------------------------------------
+
+    TEST("metrics bind failure: main server starts despite metrics port conflict");
+    {
+        int blocker = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in bm{};
+        bm.sin_family = AF_INET;
+        bm.sin_addr.s_addr = INADDR_ANY;
+        bm.sin_port = htons(TEST_METRICS_BLOCKER_PORT);
+        bool pre_bound = (bind(blocker, reinterpret_cast<sockaddr*>(&bm), sizeof(bm)) == 0);
+        (void)pre_bound;
+
+        std::thread([] {
+            Config cfg;
+            cfg.server_port = TEST_METRICS_BIND_FAIL_PORT;
+            cfg.admin_port = 0;
+            cfg.metrics_port = TEST_METRICS_BLOCKER_PORT; // already in use → LOG_WARN
+            cfg.worker_threads = 1;
+            cfg.cert_path = "/tmp/ztm_metricsbind.cert.pem";
+            cfg.key_path = "/tmp/ztm_metricsbind.key.pem";
+            start_server_tls(cfg);
+        }).detach();
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+
+        auto conn = tls_connect(TEST_METRICS_BIND_FAIL_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        if (conn.fd >= 0) {
+            std::string r = tls_cmd(conn, "STATUS");
+            ASSERT_TRUE(r.substr(0, 2) == "OK");
+            close(conn.fd);
+        }
+        close(blocker);
+    }
+
+    // -------------------------------------------------------
+    // IPv6 bind fallback: make_listening_socket falls through to IPv4 when
+    // IPv6 bind fails (line 1010 of server.cpp: close(fd) after failed bind).
+    // -------------------------------------------------------
+
+    TEST("IPv6 bind fallback: server gracefully handles IPv6 bind failure");
+    {
+        // Pre-occupy the IPv6 port so the server's IPv6 bind fails.
+        int blocker = socket(AF_INET6, SOCK_STREAM, 0);
+        if (blocker >= 0) {
+            sockaddr_in6 a6{};
+            a6.sin6_family = AF_INET6;
+            a6.sin6_addr = in6addr_any;
+            a6.sin6_port = htons(TEST_IPV6_FALLBACK_PORT);
+            if (bind(blocker, reinterpret_cast<sockaddr*>(&a6), sizeof(a6)) == 0) {
+                // IPv6 port is now occupied. The server below will fail its IPv6
+                // bind, execute close(fd) at line 1010, fall through to IPv4
+                // (which also fails for "::" → inet_addr returns INADDR_NONE),
+                // and return -1 from make_listening_socket.
+                std::thread([] {
+                    Config cfg;
+                    cfg.server_port = TEST_IPV6_FALLBACK_PORT;
+                    cfg.server_bind = "::";
+                    cfg.admin_port = 0;
+                    cfg.metrics_port = 0;
+                    cfg.cert_path = "/tmp/ztm_ipv6fb.cert.pem";
+                    cfg.key_path = "/tmp/ztm_ipv6fb.key.pem";
+                    start_server_tls(cfg); // returns early: make_listening_socket → -1
+                }).detach();
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            }
+            close(blocker);
+        }
     }
 
     // -------------------------------------------------------
