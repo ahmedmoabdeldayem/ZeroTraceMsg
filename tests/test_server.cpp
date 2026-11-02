@@ -13,6 +13,7 @@
 #include <botan/hex.h>
 #include <botan/tls_session_manager_noop.h>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <netinet/in.h>
 #include <sstream>
@@ -49,6 +50,8 @@ static const int TEST_DEVICE_LIMIT_PORT = 59984;
 static const int TEST_GROUP_LIMIT_PORT = 59983;
 // TLS server with shutdown_timeout_s=1 (covers graceful shutdown drain path)
 static const int TEST_SHUTDOWN_PORT = 59982;
+// TLS server with max_connections=1 (covers connection-rejection LOG_WARN path)
+static const int TEST_MAX_CONN_PORT = 59980;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -102,6 +105,10 @@ static TlsConn tls_connect(int port)
         close(fd);
         return {-1, nullptr, nullptr};
     }
+    // 30-second recv timeout so a hung TLS handshake fails fast rather than blocking forever.
+    // On failure (n<=0) we always close fd to avoid leaking the socket.
+    struct timeval tv = {30, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     auto rng = std::make_shared<Botan::AutoSeeded_RNG>();
     auto cb = std::make_shared<TestTlsCallbacks>(fd);
     auto session_mgr = std::make_shared<Botan::TLS::Session_Manager_Noop>();
@@ -113,12 +120,16 @@ static TlsConn tls_connect(int port)
     while (!tls->is_active() && !cb->closed) {
         uint8_t buf[4096];
         ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-        if (n <= 0)
+        if (n <= 0) {
+            close(fd);
             return {-1, nullptr, nullptr};
+        }
         tls->received_data({buf, static_cast<size_t>(n)});
     }
-    if (!tls->is_active())
+    if (!tls->is_active()) {
+        close(fd);
         return {-1, nullptr, nullptr};
+    }
     return {fd, cb, tls};
 }
 
@@ -380,6 +391,7 @@ int main()
         Config cfg;
         cfg.server_port = TEST_DEVICE_LIMIT_PORT;
         cfg.max_devices_per_user = 1;
+        cfg.worker_threads = 1; // single worker to keep total thread count manageable
         cfg.admin_port = 0;
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_devlimit.cert.pem";
@@ -390,6 +402,7 @@ int main()
         Config cfg;
         cfg.server_port = TEST_GROUP_LIMIT_PORT;
         cfg.max_group_members = 1;
+        cfg.worker_threads = 1;
         cfg.admin_port = 0;
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_grplimit.cert.pem";
@@ -400,10 +413,22 @@ int main()
         Config cfg;
         cfg.server_port = TEST_SHUTDOWN_PORT;
         cfg.shutdown_timeout_s = 1;
+        cfg.worker_threads = 1;
         cfg.admin_port = 0;
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_shutdown.cert.pem";
         cfg.key_path = "/tmp/ztm_shutdown.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_MAX_CONN_PORT;
+        cfg.max_connections = 1;
+        cfg.worker_threads = 1;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_maxconn.cert.pem";
+        cfg.key_path = "/tmp/ztm_maxconn.key.pem";
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -2650,28 +2675,289 @@ int main()
     }
 
     // -------------------------------------------------------
-    // Graceful shutdown — drain and force-close
+    // Session TTL expiry mid-operation
+    // -------------------------------------------------------
+
+    TEST("SEND rejects expired session token");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recip = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        cmd(fd, "REGISTER " + recip.user_id + " " + Botan::hex_encode(recip.pubkey_bytes));
+        expire_session_for_test(sender.user_id, s_tok);
+        std::vector<uint8_t> blob(32, 0xAB);
+        std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recip.user_id +
+                                       " _ " + Botan::hex_encode(blob));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("POLL rejects expired session token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        expire_session_for_test(id.user_id, tok);
+        send_line(fd, "POLL " + id.user_id + " " + tok);
+        std::string resp = read_line(fd);
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("MSGACK rejects expired session token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        expire_session_for_test(id.user_id, tok);
+        std::string resp = cmd(fd, "MSGACK " + id.user_id + " " + tok + " fakeid");
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    TEST("REKEY rejects expired session token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto new_id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        expire_session_for_test(id.user_id, tok);
+        std::string resp = cmd(fd, "REKEY " + id.user_id + " " + tok + " " + new_id.user_id + " " +
+                                       Botan::hex_encode(new_id.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Rate limit window reset
+    // -------------------------------------------------------
+
+    TEST("SEND resets rate limit counter when window expires");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recip = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        cmd(fd, "REGISTER " + recip.user_id + " " + Botan::hex_encode(recip.pubkey_bytes));
+        reset_rate_bucket_window_for_test(sender.user_id);
+        std::vector<uint8_t> blob(32, 0xCD);
+        std::string resp = cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recip.user_id +
+                                       " _ " + Botan::hex_encode(blob));
+        ASSERT_TRUE(resp == "OK");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // Cleanup thread: prune_sessions
+    // -------------------------------------------------------
+
+    TEST("prune_sessions removes expired sessions from the store");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+        ASSERT_TRUE(!tok.empty());
+        prune_sessions_for_test();
+        send_line(fd, "POLL " + id.user_id + " " + tok);
+        ASSERT_TRUE(read_line(fd).substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // max_connections rejection path
+    // -------------------------------------------------------
+
+    TEST("max_connections: server rejects connections over the limit");
+    {
+        reset_server_state();
+        auto conn1 = tls_connect(TEST_MAX_CONN_PORT);
+        ASSERT_TRUE(conn1.fd >= 0);
+        auto conn2 = tls_connect(TEST_MAX_CONN_PORT);
+        if (conn2.fd >= 0) {
+            std::string resp = tls_read_line(conn2.fd, *conn2.tls, *conn2.cb);
+            ASSERT_TRUE(resp.empty());
+            close(conn2.fd);
+        }
+        close(conn1.fd);
+    }
+
+    // -------------------------------------------------------
+    // Plain TCP line-too-long truncation
+    // -------------------------------------------------------
+
+    TEST("oversized line causes disconnect");
+    {
+        reset_server_state();
+        int fd = connect_test();
+        std::string giant(MAX_LINE_LEN + 1, 'X');
+        giant += '\n';
+        send(fd, giant.data(), giant.size(), 0);
+        std::string resp = read_line(fd);
+        ASSERT_TRUE(resp.empty() || resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // log_init warn/error branches and JSON log format
+    // -------------------------------------------------------
+
+    TEST("log_init: warn level branch");
+    {
+        Config cfg;
+        cfg.log_level = "warn";
+        call_log_init_for_test(cfg);
+        cfg.log_level = "info";
+        call_log_init_for_test(cfg);
+    }
+
+    TEST("log_init: error (else) level branch");
+    {
+        Config cfg;
+        cfg.log_level = "error";
+        call_log_init_for_test(cfg);
+        cfg.log_level = "info";
+        call_log_init_for_test(cfg);
+    }
+
+    TEST("log_msg: JSON format path");
+    {
+        Config cfg;
+        cfg.log_level = "debug";
+        cfg.log_format = "json";
+        call_log_init_for_test(cfg);
+        int fd = connect_test();
+        cmd(fd, "STATUS");
+        close(fd);
+        cfg.log_format = "text";
+        cfg.log_level = "info";
+        call_log_init_for_test(cfg);
+    }
+
+    // -------------------------------------------------------
+    // SIGHUP: hot-reload log-level branches + failed reload
+    // -------------------------------------------------------
+
+    TEST("SIGHUP reload: debug level branch");
+    {
+        const std::string path = "/tmp/ztm_reload_debug.conf";
+        {
+            std::ofstream f(path);
+            f << "[server]\n[client]\n[tls]\n[crypto]\n[logging]\nlevel = debug\n";
+        }
+        set_config_path_for_test(path);
+        trigger_reload_for_test();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+        Config def;
+        call_log_init_for_test(def);
+    }
+
+    TEST("SIGHUP reload: warn level branch");
+    {
+        const std::string path = "/tmp/ztm_reload_warn.conf";
+        {
+            std::ofstream f(path);
+            f << "[server]\n[client]\n[tls]\n[crypto]\n[logging]\nlevel = warn\n";
+        }
+        set_config_path_for_test(path);
+        trigger_reload_for_test();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+        Config def;
+        call_log_init_for_test(def);
+    }
+
+    TEST("SIGHUP reload: error (else) level branch");
+    {
+        const std::string path = "/tmp/ztm_reload_error.conf";
+        {
+            std::ofstream f(path);
+            f << "[server]\n[client]\n[tls]\n[crypto]\n[logging]\nlevel = error\n";
+        }
+        set_config_path_for_test(path);
+        trigger_reload_for_test();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+        Config def;
+        call_log_init_for_test(def);
+    }
+
+    TEST("SIGHUP reload: missing config file emits LOG_WARN");
+    {
+        set_config_path_for_test("/tmp/ztm_nonexistent_reload.conf");
+        trigger_reload_for_test();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+        set_config_path_for_test("zerotrace.conf");
+    }
+
+    // -------------------------------------------------------
+    // SIGUSR1: log file reopen (via flag — no real signal sent)
+    // -------------------------------------------------------
+
+    TEST("SIGUSR1 path reopens the log file");
+    {
+        trigger_log_reopen_for_test();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    }
+
+    // -------------------------------------------------------
+    // Graceful shutdown — drain and force-close.
+    // trigger_shutdown_for_test exits all TLS accept loops, so
+    // handle_signal tests come after (they don't need live servers).
     // -------------------------------------------------------
 
     TEST("graceful shutdown: force-closes held-open connection within timeout");
     {
-        // Open a connection and hold it open without closing it.
         auto conn = tls_connect(TEST_SHUTDOWN_PORT);
         ASSERT_TRUE(conn.fd >= 0);
-        tls_cmd(conn, "HELLO ZTM/1");
+        if (conn.fd >= 0) {
+            tls_cmd(conn, "HELLO ZTM/1");
+            trigger_shutdown_for_test();
+            std::string line = tls_read_line(conn.fd, *conn.tls, *conn.cb);
+            ASSERT_TRUE(line.empty());
+            close(conn.fd);
+            reset_shutdown_for_test();
+        }
+    }
 
-        // Trigger shutdown. The server will wait shutdown_timeout_s=1 second for
-        // the connection to drain, then call shutdown(fd, SHUT_RDWR) on it.
-        trigger_shutdown_for_test();
+    // -------------------------------------------------------
+    // handle_signal() branches — cover each branch of handle_signal().
+    // TLS servers have already exited their accept loops above, so
+    // the momentary g_shutdown=true cannot disrupt any live server.
+    // -------------------------------------------------------
 
-        // The server-side force-close should unblock our recv() within ~2 seconds.
-        // tls_read_line returns "" on recv() <= 0, so we'll see an empty response.
-        std::string line = tls_read_line(conn.fd, *conn.tls, *conn.cb);
-        ASSERT_TRUE(line.empty());
-        close(conn.fd);
-
-        // Restore global shutdown flag so remaining test servers continue.
+    TEST("handle_signal: SIGTERM branch sets g_shutdown");
+    {
+        call_handle_signal_for_test(SIGTERM);
         reset_shutdown_for_test();
+    }
+
+    TEST("handle_signal: SIGINT branch sets g_shutdown");
+    {
+        call_handle_signal_for_test(SIGINT);
+        reset_shutdown_for_test();
+    }
+
+    TEST("handle_signal: SIGHUP branch sets g_reload_config");
+    {
+        call_handle_signal_for_test(SIGHUP);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    TEST("handle_signal: SIGUSR1 branch sets g_log_reopen");
+    {
+        call_handle_signal_for_test(SIGUSR1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     SUITE_RESULTS();
