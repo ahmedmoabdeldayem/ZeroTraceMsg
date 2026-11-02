@@ -1324,7 +1324,7 @@ class ServerTlsPolicy : public Botan::TLS::Policy
 static void ensure_server_cert(const Config& cfg)
 {
     std::ifstream k(cfg.key_path), c(cfg.cert_path);
-    if (k.good() && c.good())
+    if (k.good() && c.good() && k.peek() != EOF && c.peek() != EOF)
         return;
 
     Botan::AutoSeeded_RNG rng;
@@ -1431,11 +1431,13 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
 
         // SIGUSR1: reopen log file (for logrotate integration)
         if (g_log_reopen.exchange(false)) {
-            std::lock_guard<std::mutex> lk(g_log_mutex);
-            if (g_log_file.is_open()) {
-                g_log_file.close();
-                g_log_file.open(cfg.log_file, std::ios::app);
-            }
+            {
+                std::lock_guard<std::mutex> lk(g_log_mutex);
+                if (g_log_file.is_open()) {
+                    g_log_file.close();
+                    g_log_file.open(cfg.log_file, std::ios::app);
+                }
+            } // release g_log_mutex before calling LOG_INFO (which also acquires it)
             LOG_INFO("[SIGUSR1] Log file reopened");
         }
 
@@ -1527,3 +1529,33 @@ void reset_server_state()
 
 void trigger_shutdown_for_test() { g_shutdown.store(true); }
 void reset_shutdown_for_test() { g_shutdown.store(false); }
+
+void expire_session_for_test(const std::string& user_id, const std::string& token)
+{
+    std::lock_guard<std::mutex> lock(store_mutex);
+    get_store().put_session(user_id, token, 0); // created_at=0 → immediately expired
+}
+
+void reset_rate_bucket_window_for_test(const std::string& user_id)
+{
+    std::lock_guard<std::mutex> lock(store_mutex);
+    get_store().put_rate_bucket(user_id, 1, 0, 0); // window_start=0 → window is stale
+}
+
+void prune_sessions_for_test()
+{
+    std::lock_guard<std::mutex> lock(store_mutex);
+    // Use a far-future cutoff so all sessions are treated as expired.
+    int64_t future = now_unix() + 1'000'000;
+    get_store().prune_sessions(future);
+}
+
+void call_log_init_for_test(const Config& cfg) { log_init(cfg); }
+
+void set_config_path_for_test(const std::string& path) { g_config_path = path; }
+
+void call_handle_signal_for_test(int sig) { handle_signal(sig); }
+
+void trigger_reload_for_test() { g_reload_config.store(true); }
+
+void trigger_log_reopen_for_test() { g_log_reopen.store(true); }
