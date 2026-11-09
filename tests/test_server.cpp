@@ -1954,8 +1954,7 @@ int main()
         int fd = connect_test();
         std::string c_tok = extract_token(
             cmd(fd, "REGISTER " + caller.user_id + " " + Botan::hex_encode(caller.pubkey_bytes)));
-        std::string resp =
-            cmd(fd, "GETLINKED 0000000000000000 " + caller.user_id + " " + c_tok);
+        std::string resp = cmd(fd, "GETLINKED 0000000000000000 " + caller.user_id + " " + c_tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2013,8 +2012,7 @@ int main()
             cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         ASSERT_EQ(add_resp, std::string("OK"));
 
-        std::string list_resp =
-            cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
+        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list_resp.find(member.user_id) != std::string::npos);
         ASSERT_TRUE(list_resp.find(owner.user_id) != std::string::npos);
         close(fd);
@@ -2075,8 +2073,7 @@ int main()
         int fd = connect_test();
         std::string c_tok = extract_token(
             cmd(fd, "REGISTER " + caller.user_id + " " + Botan::hex_encode(caller.pubkey_bytes)));
-        std::string resp =
-            cmd(fd, "LIST_MEMBERS 0000000000000000 " + caller.user_id + " " + c_tok);
+        std::string resp = cmd(fd, "LIST_MEMBERS 0000000000000000 " + caller.user_id + " " + c_tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }

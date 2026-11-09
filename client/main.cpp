@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
-#include <span>
 #include <botan/aead.h>
 #include <botan/auto_rng.h>
 #include <botan/hash.h>
@@ -26,6 +25,7 @@
 #include <mutex>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <span>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
@@ -229,8 +229,8 @@ static void load_prekeys_from_file()
             PrekeyPair pk;
             pk.prekey_id = pk_id;
             auto raw1 = Botan::hex_decode(hex1);
-            pk.priv_key = kem_key_from_bytes(
-                std::span<const uint8_t>(raw1.data(), raw1.size()), g_cfg, /*secondary=*/false);
+            pk.priv_key = kem_key_from_bytes(std::span<const uint8_t>(raw1.data(), raw1.size()),
+                                             g_cfg, /*secondary=*/false);
             if (!hex2.empty()) {
                 auto raw2 = Botan::hex_decode(hex2);
                 pk.priv_key2 = kem_key_from_bytes(
@@ -582,8 +582,8 @@ static void do_send(int fd, const std::string& recipient_id, const std::string& 
         std::vector<std::string> devices;
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
-            send_line(fd, "GETLINKED " + recipient_id + " " + identity.user_id + " " +
-                              session_token);
+            send_line(fd,
+                      "GETLINKED " + recipient_id + " " + identity.user_id + " " + session_token);
             std::string resp = read_line(fd);
             if (resp.size() >= 3 && resp.substr(0, 3) == "OK ") {
                 std::istringstream ss(resp.substr(3));
@@ -1271,8 +1271,7 @@ int main(int argc, char* argv[])
                 std::string gid;
                 ss >> gid;
                 std::lock_guard<std::mutex> lock(socket_mutex);
-                send_line(fd, "LIST_MEMBERS " + gid + " " + identity.user_id + " " +
-                                  session_token);
+                send_line(fd, "LIST_MEMBERS " + gid + " " + identity.user_id + " " + session_token);
                 std::cout << "\n[" << read_line(fd) << "]\n";
             } else if (sub == "send") {
                 std::string gid, text;
