@@ -696,6 +696,16 @@ int Store::member_count(const std::string& group_id)
     return sqlite3_column_int(st.s, 0);
 }
 
+int Store::owned_group_count(const std::string& owner_id)
+{
+    Stmt st;
+    check(sqlite3_prepare_v2(db_, "SELECT COUNT(*) FROM groups WHERE owner_id=?", -1, &st.s,
+                             nullptr));
+    check(sqlite3_bind_text(st.s, 1, owner_id.c_str(), -1, SQLITE_STATIC));
+    check(sqlite3_step(st.s));
+    return sqlite3_column_int(st.s, 0);
+}
+
 void Store::remove_user_from_all_groups(const std::string& user_id)
 {
     // Delete groups owned by this user

@@ -27,8 +27,14 @@ struct Config {
     std::string db_path = "zerotrace.db";
     // Admin port bound to 127.0.0.1. 0 = disabled.
     int admin_port = 9998;
-    // Prometheus metrics HTTP port (0.0.0.0). 0 = disabled.
+    // Optional shared-secret token required as the first line of every admin connection.
+    // Empty string = no auth required (keep clear for LAN-only or test deployments).
+    std::string admin_token = "";
+    // Prometheus metrics HTTP port. 0 = disabled.
     int metrics_port = 9997;
+    // Address the metrics server binds to. Default 127.0.0.1 (loopback-only).
+    // Set to 0.0.0.0 only if the port is firewalled.
+    std::string metrics_bind_address = "127.0.0.1";
     // Maximum one-time prekeys stored per user on the server. 0 = unlimited.
     int max_prekeys_per_user = 100;
     // Number of prekeys a client generates and uploads per batch.

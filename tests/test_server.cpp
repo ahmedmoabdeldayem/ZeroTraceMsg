@@ -1880,7 +1880,8 @@ int main()
             cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
         ASSERT_EQ(link_resp, std::string("OK"));
 
-        std::string gl_resp = cmd(fd, "GETLINKED " + primary.user_id);
+        std::string gl_resp =
+            cmd(fd, "GETLINKED " + primary.user_id + " " + primary.user_id + " " + p_tok);
         ASSERT_TRUE(gl_resp.find(device.user_id) != std::string::npos);
         close(fd);
     }
@@ -1900,7 +1901,8 @@ int main()
             cmd(fd, "UNLINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
         ASSERT_EQ(unlink_resp, std::string("OK"));
 
-        std::string gl_resp = cmd(fd, "GETLINKED " + primary.user_id);
+        std::string gl_resp =
+            cmd(fd, "GETLINKED " + primary.user_id + " " + primary.user_id + " " + p_tok);
         ASSERT_TRUE(gl_resp.find(device.user_id) == std::string::npos);
         close(fd);
     }
@@ -1948,8 +1950,12 @@ int main()
     TEST("GETLINKED returns ERR for unknown user");
     {
         reset_server_state();
+        auto caller = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string resp = cmd(fd, "GETLINKED 0000000000000000");
+        std::string c_tok = extract_token(
+            cmd(fd, "REGISTER " + caller.user_id + " " + Botan::hex_encode(caller.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "GETLINKED 0000000000000000 " + caller.user_id + " " + c_tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -1968,7 +1974,8 @@ int main()
         cmd(fd, "DEREGISTER " + primary.user_id + " " + p_tok);
 
         // Device is still registered but link is gone
-        std::string gl_resp = cmd(fd, "GETLINKED " + device.user_id);
+        std::string gl_resp =
+            cmd(fd, "GETLINKED " + device.user_id + " " + device.user_id + " " + d_tok);
         ASSERT_TRUE(gl_resp.find(primary.user_id) == std::string::npos);
         close(fd);
     }
@@ -2006,7 +2013,8 @@ int main()
             cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         ASSERT_EQ(add_resp, std::string("OK"));
 
-        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid);
+        std::string list_resp =
+            cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list_resp.find(member.user_id) != std::string::npos);
         ASSERT_TRUE(list_resp.find(owner.user_id) != std::string::npos);
         close(fd);
@@ -2025,7 +2033,7 @@ int main()
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
 
         cmd(fd, "REMOVE_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
-        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid);
+        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list_resp.find(member.user_id) == std::string::npos);
         close(fd);
     }
@@ -2063,8 +2071,12 @@ int main()
     TEST("LIST_MEMBERS returns ERR for unknown group");
     {
         reset_server_state();
+        auto caller = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string resp = cmd(fd, "LIST_MEMBERS 0000000000000000");
+        std::string c_tok = extract_token(
+            cmd(fd, "REGISTER " + caller.user_id + " " + Botan::hex_encode(caller.pubkey_bytes)));
+        std::string resp =
+            cmd(fd, "LIST_MEMBERS 0000000000000000 " + caller.user_id + " " + c_tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2139,7 +2151,9 @@ int main()
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         std::string del = cmd(fd, "DELETE_GROUP " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_EQ(del, std::string("OK"));
-        ASSERT_TRUE(cmd(fd, "LIST_MEMBERS " + gid).substr(0, 3) == "ERR");
+        ASSERT_TRUE(
+            cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok).substr(0, 3) ==
+            "ERR");
         close(fd);
     }
 
@@ -2174,7 +2188,7 @@ int main()
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         ASSERT_EQ(cmd(fd, "LEAVE_GROUP " + gid + " " + member.user_id + " " + m_tok),
                   std::string("OK"));
-        std::string list = cmd(fd, "LIST_MEMBERS " + gid);
+        std::string list = cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list.find(member.user_id) == std::string::npos);
         close(fd);
     }
@@ -2472,8 +2486,10 @@ int main()
         std::string resp = cmd(fd, "REKEY " + primary.user_id + " " + p_tok + " " + new_id.user_id +
                                        " " + Botan::hex_encode(new_id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string new_p_tok = resp.substr(3); // new token for the new identity
         // Device should now be linked to new identity
-        std::string linked = cmd(fd, "GETLINKED " + new_id.user_id);
+        std::string linked =
+            cmd(fd, "GETLINKED " + new_id.user_id + " " + new_id.user_id + " " + new_p_tok);
         ASSERT_TRUE(linked.find(device.user_id) != std::string::npos);
         close(fd);
     }

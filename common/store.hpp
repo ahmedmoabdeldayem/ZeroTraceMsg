@@ -116,6 +116,8 @@ class Store
     bool is_member(const std::string& group_id, const std::string& user_id);
     std::vector<std::string> list_members(const std::string& group_id);
     int member_count(const std::string& group_id);
+    // Count groups where owner_id is the owner (used to enforce max_groups_per_user).
+    int owned_group_count(const std::string& owner_id);
     // Remove all groups owned by user_id and memberships where user_id is a member.
     void remove_user_from_all_groups(const std::string& user_id);
 

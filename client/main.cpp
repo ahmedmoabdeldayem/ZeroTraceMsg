@@ -4,12 +4,15 @@
 #include "../common/config.hpp"
 #include "../common/crypto.hpp"
 #include "../common/identity.hpp"
+#include "../common/kem.hpp"
 #include "../common/protocol.hpp"
 #include "../common/replay.hpp"
 #include "../common/secure_memory.hpp"
 #include "../common/tls_utils.hpp"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <atomic>
+#include <span>
 #include <botan/aead.h>
 #include <botan/auto_rng.h>
 #include <botan/hash.h>
@@ -123,27 +126,125 @@ static Botan::secure_vector<uint8_t>
 static std::string g_pin_file; // TOFU cert pin file path
 static ReplayGuard replay_guard;
 
-static void save_prekeys_to_file()
+// Save prekeys encrypted with g_contacts_key (AES-256-GCM).
+// Takes an explicit RNG so each call site can pass its own thread-local RNG.
+static void save_prekeys_to_file(Botan::AutoSeeded_RNG& save_rng)
+{
+    if (prekeys_file.empty() || g_contacts_key.empty())
+        return;
+
+    std::string plaintext;
+    for (auto& [pk_id, pk] : prekey_store) {
+        auto raw = pk.priv_key->raw_private_key_bits();
+        plaintext += pk_id + " " + Botan::hex_encode(raw);
+        if (pk.priv_key2) {
+            auto raw2 = pk.priv_key2->raw_private_key_bits();
+            plaintext += " " + Botan::hex_encode(raw2);
+        }
+        plaintext += "\n";
+    }
+
+    auto nonce = save_rng.random_vec(12);
+    auto enc = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
+    enc->set_key(g_contacts_key);
+    enc->start(nonce);
+    Botan::secure_vector<uint8_t> buf(plaintext.begin(), plaintext.end());
+    std::fill(plaintext.begin(), plaintext.end(), '\0');
+    enc->finish(buf);
+
+    std::ofstream out(prekeys_file, std::ios::binary | std::ios::trunc);
+    if (!out)
+        return;
+    out.write(reinterpret_cast<const char*>(nonce.data()), nonce.size());
+    out.write(reinterpret_cast<const char*>(buf.data()), buf.size());
+}
+
+// Load prekeys from the encrypted file. Falls back gracefully for old plaintext files.
+static void load_prekeys_from_file()
 {
     if (prekeys_file.empty())
         return;
-    std::vector<PrekeyPair*> ptrs;
-    for (auto& [id, pk] : prekey_store)
-        ptrs.push_back(&pk);
-    // Rebuild vector for save_prekeys (it takes const vector<PrekeyPair>&)
-    // Re-use save_prekeys by building a temporary non-owning view isn't possible;
-    // write directly instead.
-    std::ofstream out(prekeys_file, std::ios::trunc);
-    if (!out)
+
+    std::ifstream f(prekeys_file, std::ios::binary);
+    if (!f)
+        return; // first run — no file yet
+
+    // Detect format: old plaintext files start with 16 hex chars (the prekey_id).
+    // Random AES nonce bytes are virtually certain to contain at least one non-hex byte.
+    char header[16];
+    f.read(header, 16);
+    if (f.gcount() < 16)
         return;
-    for (auto& [pk_id, pk] : prekey_store) {
-        auto raw = pk.priv_key->raw_private_key_bits();
-        out << pk_id << " " << Botan::hex_encode(raw);
-        if (pk.priv_key2) {
-            auto raw2 = pk.priv_key2->raw_private_key_bits();
-            out << " " << Botan::hex_encode(raw2);
+
+    bool looks_like_plaintext = true;
+    for (int i = 0; i < 16; ++i) {
+        char c = header[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            looks_like_plaintext = false;
+            break;
         }
-        out << "\n";
+    }
+    f.seekg(0);
+
+    if (looks_like_plaintext) {
+        // Old unencrypted format — load and immediately re-save encrypted.
+        prekey_store = load_prekeys(prekeys_file, g_cfg);
+        if (!prekey_store.empty() && !g_contacts_key.empty()) {
+            save_prekeys_to_file(rng);
+        }
+        return;
+    }
+
+    if (g_contacts_key.empty())
+        return;
+
+    // Encrypted format: 12-byte nonce | AES-256-GCM ciphertext
+    std::vector<uint8_t> nonce(12);
+    f.read(reinterpret_cast<char*>(nonce.data()), 12);
+    if (f.gcount() < 12)
+        return;
+
+    std::string raw_ct(std::istreambuf_iterator<char>(f), {});
+    if (raw_ct.empty())
+        return;
+
+    try {
+        Botan::secure_vector<uint8_t> ct(raw_ct.begin(), raw_ct.end());
+        auto dec = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Decryption);
+        dec->set_key(g_contacts_key);
+        dec->start(nonce);
+        dec->finish(ct);
+
+        std::istringstream ss(std::string(ct.begin(), ct.end()));
+        std::string line;
+        while (std::getline(ss, line)) {
+            if (line.empty())
+                continue;
+            std::istringstream ls(line);
+            std::string pk_id, hex1, hex2;
+            ls >> pk_id >> hex1;
+            ls >> hex2;
+            if (pk_id.empty() || hex1.empty())
+                continue;
+            PrekeyPair pk;
+            pk.prekey_id = pk_id;
+            auto raw1 = Botan::hex_decode(hex1);
+            pk.priv_key = kem_key_from_bytes(
+                std::span<const uint8_t>(raw1.data(), raw1.size()), g_cfg, /*secondary=*/false);
+            if (!hex2.empty()) {
+                auto raw2 = Botan::hex_decode(hex2);
+                pk.priv_key2 = kem_key_from_bytes(
+                    std::span<const uint8_t>(raw2.data(), raw2.size()), g_cfg, /*secondary=*/true);
+            }
+            pk.pubkey_bytes = kem_pubkey_bytes(*pk.priv_key);
+            if (pk.priv_key2) {
+                auto pub2 = kem_pubkey_bytes(*pk.priv_key2);
+                pk.pubkey_bytes.insert(pk.pubkey_bytes.end(), pub2.begin(), pub2.end());
+            }
+            prekey_store[pk_id] = std::move(pk);
+        }
+    } catch (...) {
+        // Corrupt or wrong key — start with empty prekey_store (auto-replenished on poll).
     }
 }
 
@@ -180,10 +281,28 @@ static void load_contacts(const std::string& path)
         dec->finish(ct);
 
         std::istringstream ss(std::string(ct.begin(), ct.end()));
-        std::string id, nick;
-        while (ss >> id >> nick) {
-            contacts[id] = nick;
-            contacts_rev[nick] = id;
+        std::string cline;
+        while (std::getline(ss, cline)) {
+            if (cline.empty())
+                continue;
+            auto tab = cline.find('\t');
+            if (tab != std::string::npos) {
+                // Tab-delimited format (new): "id\tnick"
+                std::string id = cline.substr(0, tab);
+                std::string nick = cline.substr(tab + 1);
+                if (!id.empty() && !nick.empty()) {
+                    contacts[id] = nick;
+                    contacts_rev[nick] = id;
+                }
+            } else {
+                // Space-delimited fallback for old files: "id nick"
+                std::istringstream ls(cline);
+                std::string id, nick;
+                if (ls >> id >> nick) {
+                    contacts[id] = nick;
+                    contacts_rev[nick] = id;
+                }
+            }
         }
     } catch (...) {
         // Corrupt or tampered — start with empty contacts
@@ -197,7 +316,7 @@ static void save_contacts(const std::string& path)
 
     std::string plaintext;
     for (const auto& [id, nick] : contacts)
-        plaintext += id + " " + nick + "\n";
+        plaintext += id + "\t" + nick + "\n"; // tab-delimited: supports nicknames with spaces
 
     auto nonce = rng.random_vec(12);
     auto enc = Botan::AEAD_Mode::create_or_throw("AES-256/GCM", Botan::Cipher_Dir::Encryption);
@@ -463,7 +582,8 @@ static void do_send(int fd, const std::string& recipient_id, const std::string& 
         std::vector<std::string> devices;
         {
             std::lock_guard<std::mutex> lock(socket_mutex);
-            send_line(fd, "GETLINKED " + recipient_id);
+            send_line(fd, "GETLINKED " + recipient_id + " " + identity.user_id + " " +
+                              session_token);
             std::string resp = read_line(fd);
             if (resp.size() >= 3 && resp.substr(0, 3) == "OK ") {
                 std::istringstream ss(resp.substr(3));
@@ -576,6 +696,8 @@ static int reconnect_with_backoff(const std::string& server_ip)
 
 static void poll_thread(std::string server_ip)
 {
+    // Use a thread-local RNG so this thread never races with the main thread's global rng.
+    Botan::AutoSeeded_RNG poll_rng;
     while (true) {
         std::this_thread::sleep_for(std::chrono::seconds(g_cfg.poll_interval_s));
 
@@ -641,7 +763,7 @@ static void poll_thread(std::string server_ip)
                 } else if (cnt_resp.size() > 3 && cnt_resp.substr(0, 3) == "OK ") {
                     int server_count = std::stoi(cnt_resp.substr(3));
                     if (server_count < g_cfg.prekey_refill_threshold) {
-                        auto new_pks = generate_prekeys(g_cfg.prekey_batch_size, rng, g_cfg);
+                        auto new_pks = generate_prekeys(g_cfg.prekey_batch_size, poll_rng, g_cfg);
                         std::string upload =
                             "UPLOAD_PREKEYS " + identity.user_id + " " + session_token;
                         for (auto& pk : new_pks)
@@ -652,7 +774,7 @@ static void poll_thread(std::string server_ip)
                         } else {
                             for (auto& pk : new_pks)
                                 prekey_store[pk.prekey_id] = std::move(pk);
-                            save_prekeys_to_file();
+                            save_prekeys_to_file(poll_rng);
                         }
                     }
                 }
@@ -699,9 +821,9 @@ static void poll_thread(std::string server_ip)
                         if (it != prekey_store.end()) {
                             auto& pk = it->second;
                             decrypted = decrypt_message(blob, *pk.priv_key, pk.priv_key2.get(),
-                                                        pk.pubkey_bytes, rng, g_cfg);
+                                                        pk.pubkey_bytes, poll_rng, g_cfg);
                             prekey_store.erase(it);
-                            save_prekeys_to_file();
+                            save_prekeys_to_file(poll_rng);
                         } else {
                             continue; // prekey not found — skip undecryptable message
                         }
@@ -889,8 +1011,8 @@ int main(int argc, char* argv[])
     // Derive contacts encryption key from the private key (deterministic, no extra passphrase)
     g_contacts_key = derive_contacts_key(identity, g_cfg);
 
-    // Load any previously-generated prekey private keys from disk.
-    prekey_store = load_prekeys(prekeys_file, g_cfg);
+    // Load previously-generated prekey private keys from disk (encrypted since this audit fix).
+    load_prekeys_from_file();
 
     // -------------------------------------------------------
     // Connect and register
@@ -922,7 +1044,7 @@ int main(int argc, char* argv[])
         read_line(fd); // consume OK / ERR
         for (auto& pk : new_prekeys)
             prekey_store[pk.prekey_id] = std::move(pk);
-        save_prekeys_to_file();
+        save_prekeys_to_file(rng); // main thread, global rng is safe here (threads not started yet)
     }
 
     // -------------------------------------------------------
@@ -955,8 +1077,8 @@ int main(int argc, char* argv[])
         auto new_pass2 = read_passphrase("Confirm new passphrase: ");
 
         // Compare as strings — SecureString is a vector<char> (or similar).
-        if (std::string(new_pass1.data(), new_pass1.size()) !=
-            std::string(new_pass2.data(), new_pass2.size())) {
+        if (new_pass1.size() != new_pass2.size() ||
+            !std::equal(new_pass1.begin(), new_pass1.end(), new_pass2.begin())) {
             std::cerr << "Passphrases do not match. Password not changed.\n";
             return 1;
         }
@@ -1149,7 +1271,8 @@ int main(int argc, char* argv[])
                 std::string gid;
                 ss >> gid;
                 std::lock_guard<std::mutex> lock(socket_mutex);
-                send_line(fd, "LIST_MEMBERS " + gid);
+                send_line(fd, "LIST_MEMBERS " + gid + " " + identity.user_id + " " +
+                                  session_token);
                 std::cout << "\n[" << read_line(fd) << "]\n";
             } else if (sub == "send") {
                 std::string gid, text;
@@ -1162,7 +1285,8 @@ int main(int argc, char* argv[])
                     std::vector<std::string> members;
                     {
                         std::lock_guard<std::mutex> lock(socket_mutex);
-                        send_line(fd, "LIST_MEMBERS " + gid);
+                        send_line(fd, "LIST_MEMBERS " + gid + " " + identity.user_id + " " +
+                                          session_token);
                         std::string resp = read_line(fd);
                         if (resp.size() >= 3 && resp.substr(0, 3) == "OK ") {
                             std::istringstream mss(resp.substr(3));

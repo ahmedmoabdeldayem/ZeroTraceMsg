@@ -45,6 +45,28 @@ static bool g_log_json = false;
 static std::ofstream g_log_file;
 static std::mutex g_log_mutex;
 
+// Escape a string for safe embedding in a JSON value.
+static std::string json_escape(const std::string& s)
+{
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        if (c == '"')       out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c < 0x20) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+            out += buf;
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
 static void log_init(const Config& cfg)
 {
     std::string lv = cfg.log_level;
@@ -72,7 +94,7 @@ static void log_msg(int level, const std::string& msg)
     std::ostream& out = g_log_file.is_open() ? g_log_file : std::cout;
     if (g_log_json) {
         static const char* labels[] = {"debug", "info", "warn", "error"};
-        out << "{\"level\":\"" << labels[level] << "\",\"msg\":\"" << msg << "\"}\n";
+        out << "{\"level\":\"" << labels[level] << "\",\"msg\":\"" << json_escape(msg) << "\"}\n";
     } else {
         out << msg << "\n";
     }
@@ -109,7 +131,7 @@ static std::atomic<bool> g_log_reopen{false};
 static std::atomic<int> g_active_connections{0};
 static std::atomic<int64_t> g_messages_sent_total{0};
 static std::atomic<int64_t> g_rate_limit_hits_total{0};
-static int64_t g_start_time = 0;
+static std::atomic<int64_t> g_start_time{0};
 static std::string g_config_path;
 
 // Tracks every active client FD so shutdown can unblock their recv() calls.
@@ -128,11 +150,10 @@ static void handle_signal(int sig)
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-static std::string new_message_id()
+static std::string new_message_id(Botan::AutoSeeded_RNG& rng)
 {
     // Random 16-byte ID — avoids leaking total server message volume
-    static Botan::AutoSeeded_RNG id_rng;
-    return Botan::hex_encode(id_rng.random_vec(16));
+    return Botan::hex_encode(rng.random_vec(16));
 }
 
 static int64_t now_unix()
@@ -186,7 +207,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             // Health check — no auth required; safe for load balancers / k8s probes
             std::lock_guard<std::mutex> lock(store_mutex);
             Store& s = get_store();
-            int64_t uptime = now_unix() - g_start_time;
+            int64_t uptime = now_unix() - g_start_time.load();
             sl("OK users=" + std::to_string(s.user_count()) +
                " sessions=" + std::to_string(s.session_count()) + " messages=" +
                std::to_string(s.total_messages()) + " uptime=" + std::to_string(uptime));
@@ -347,10 +368,15 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 continue;
             }
 
-            if (cfg.max_prekeys_per_user > 0 &&
-                s.prekey_count(user_id) >= cfg.max_prekeys_per_user) {
-                sl("ERR prekey store full");
-                continue;
+            int current_prekey_count = 0;
+            int prekey_cap = 0;
+            if (cfg.max_prekeys_per_user > 0) {
+                current_prekey_count = s.prekey_count(user_id);
+                if (current_prekey_count >= cfg.max_prekeys_per_user) {
+                    sl("ERR prekey store full");
+                    continue;
+                }
+                prekey_cap = cfg.max_prekeys_per_user - current_prekey_count;
             }
 
             {
@@ -378,6 +404,9 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                     sl("ERR no prekeys provided");
                     continue;
                 }
+                // Enforce cap: never exceed max_prekeys_per_user total.
+                if (prekey_cap > 0 && static_cast<int>(rows.size()) > prekey_cap)
+                    rows.resize(static_cast<size_t>(prekey_cap));
                 s.put_prekeys(user_id, rows);
                 sl("OK " + std::to_string(rows.size()));
                 LOG_INFO("[UPLOAD_PREKEYS] user=" + user_id +
@@ -385,12 +414,23 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             }
 
         } else if (cmd == "GETLINKED") {
-            // Returns all device_ids linked to a primary identity, space-separated.
-            // Response: OK [device1 device2 ...]  (empty list returns "OK")
-            std::string user_id;
-            ss >> user_id;
+            // GETLINKED <target_id> <caller_id> <caller_token>
+            // Returns all device_ids linked to target_id. Requires auth.
+            std::string user_id, caller_id, token;
+            ss >> user_id >> caller_id >> token;
             std::lock_guard<std::mutex> lock(store_mutex);
             Store& s = get_store();
+            {
+                auto sess = s.get_session(caller_id);
+                bool token_ok =
+                    sess.has_value() && sess->token.size() == token.size() &&
+                    ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                             reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+                if (!token_ok) {
+                    sl("ERR invalid token");
+                    continue;
+                }
+            }
             if (!s.user_exists(user_id)) {
                 sl("ERR unknown user");
             } else {
@@ -479,6 +519,11 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 sl("ERR group name required");
                 continue;
             }
+            if (cfg.max_groups_per_user > 0 &&
+                s.owned_group_count(owner_id) >= cfg.max_groups_per_user) {
+                sl("ERR group limit reached");
+                continue;
+            }
             // Derive group_id from owner + random nonce
             std::string nonce_hex = Botan::hex_encode(rng.random_vec(8));
             auto sha = Botan::HashFunction::create_or_throw("SHA-256");
@@ -549,11 +594,23 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
             LOG_INFO("[REMOVE_MEMBER] group=" + group_id + " user=" + user_id);
 
         } else if (cmd == "LIST_MEMBERS") {
-            // LIST_MEMBERS <group_id>  — public, no auth required
-            std::string group_id;
-            ss >> group_id;
+            // LIST_MEMBERS <group_id> <caller_id> <caller_token>
+            // Returns members of a group. Requires auth.
+            std::string group_id, caller_id, token;
+            ss >> group_id >> caller_id >> token;
             std::lock_guard<std::mutex> lock(store_mutex);
             Store& s = get_store();
+            {
+                auto sess = s.get_session(caller_id);
+                bool token_ok =
+                    sess.has_value() && sess->token.size() == token.size() &&
+                    ct_equal(reinterpret_cast<const uint8_t*>(sess->token.data()),
+                             reinterpret_cast<const uint8_t*>(token.data()), sess->token.size());
+                if (!token_ok) {
+                    sl("ERR invalid token");
+                    continue;
+                }
+            }
             if (!s.group_exists(group_id)) {
                 sl("ERR unknown group");
             } else {
@@ -678,26 +735,34 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                 continue;
             }
 
-            // Rate limiting
+            // Rate limiting — token bucket.
+            // 'count' stores remaining capacity in millitokens (1 token = 1000 mt).
+            // 'window_start' stores the timestamp of the last bucket update.
             {
                 int64_t now = now_unix();
                 auto bucket = s.get_rate_bucket(sender_id);
-                int count = 0;
-                int64_t window_start = now;
+                int remaining_mt = cfg.rate_limit_msgs * 1000; // start full
+                int64_t last_update = now;
                 if (bucket.has_value()) {
-                    count = bucket->count;
-                    window_start = bucket->window_start;
-                    if (now - window_start >= cfg.rate_limit_window_s) {
-                        count = 0;
-                        window_start = now;
+                    remaining_mt = bucket->count;
+                    last_update = bucket->window_start;
+                    int64_t elapsed = now - last_update;
+                    if (elapsed > 0) {
+                        int64_t refill = elapsed * static_cast<int64_t>(cfg.rate_limit_msgs) *
+                                         1000 / cfg.rate_limit_window_s;
+                        int64_t new_mt = static_cast<int64_t>(remaining_mt) + refill;
+                        if (new_mt > static_cast<int64_t>(cfg.rate_limit_msgs) * 1000)
+                            new_mt = static_cast<int64_t>(cfg.rate_limit_msgs) * 1000;
+                        remaining_mt = static_cast<int>(new_mt);
+                        last_update = now;
                     }
                 }
-                if (count >= cfg.rate_limit_msgs) {
+                if (remaining_mt < 1000) {
                     g_rate_limit_hits_total.fetch_add(1);
                     sl("ERR rate limit exceeded");
                     continue;
                 }
-                s.put_rate_bucket(sender_id, count + 1, window_start, now);
+                s.put_rate_bucket(sender_id, remaining_mt - 1000, last_update, now);
             }
 
             if (!s.user_exists(recipient_id)) {
@@ -716,7 +781,7 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
                     sl("ERR blob too large");
                     continue;
                 }
-                std::string msg_id = new_message_id();
+                std::string msg_id = new_message_id(rng);
                 s.enqueue(msg_id, recipient_id, sender_id, blob, prekey_id, now_unix());
                 g_messages_sent_total.fetch_add(1);
                 sl("OK");
@@ -950,15 +1015,20 @@ static void handle_client(int client_fd, SendFn sl, RecvFn rl, const Config& cfg
     }
 
     LOG_INFO("[DISCONNECT] client disconnected (fd=" + std::to_string(client_fd) + ")");
-    close(client_fd);
+    // fd is closed by the caller (Guard in TLS path; plain-TCP lambda in test path).
 }
 
 // ── background cleanup ────────────────────────────────────────────────────────
 
 static void cleanup_thread(const Config& cfg)
 {
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::minutes(cfg.cleanup_interval_min));
+    // Sleep in 1-second steps so g_shutdown is noticed within 1 s.
+    int interval_s = cfg.cleanup_interval_min * 60;
+    while (!g_shutdown.load()) {
+        for (int i = 0; i < interval_s && !g_shutdown.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (g_shutdown.load())
+            break;
         int64_t now = now_unix();
         int64_t msg_cutoff = now - int64_t(cfg.msg_ttl_hours) * 3600;
         int64_t sess_cutoff =
@@ -976,7 +1046,7 @@ static void cleanup_thread(const Config& cfg)
         if (sess_cutoff > 0)
             s.prune_sessions(sess_cutoff);
         s.prune_rate_buckets(bucket_cutoff);
-    }
+    } // end while
 }
 
 // ── socket helper ─────────────────────────────────────────────────────────────
@@ -1034,7 +1104,7 @@ static std::string build_metrics_text()
 {
     std::lock_guard<std::mutex> lock(store_mutex);
     Store& s = get_store();
-    int64_t uptime = (g_start_time > 0) ? (now_unix() - g_start_time) : 0;
+    int64_t uptime = (g_start_time.load() > 0) ? (now_unix() - g_start_time.load()) : 0;
 
     std::ostringstream out;
     auto write_metric = [&](const char* name, const char* type, const char* help, int64_t val) {
@@ -1086,13 +1156,24 @@ static void handle_metrics_client(int fd)
     close(fd);
 }
 
+static std::atomic<int> g_metrics_active{0};
+static constexpr int METRICS_MAX_CONN = 32;
+
 static void metrics_accept_loop(int metrics_fd)
 {
     while (true) {
         int cfd = accept(metrics_fd, nullptr, nullptr);
         if (cfd < 0)
             continue;
-        std::thread([cfd]() { handle_metrics_client(cfd); }).detach();
+        if (g_metrics_active.fetch_add(1) >= METRICS_MAX_CONN) {
+            g_metrics_active.fetch_sub(1);
+            close(cfd);
+            continue;
+        }
+        std::thread([cfd]() {
+            handle_metrics_client(cfd);
+            g_metrics_active.fetch_sub(1);
+        }).detach();
     }
 }
 
@@ -1108,7 +1189,9 @@ static void start_metrics_server(const Config& cfg)
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = cfg.metrics_bind_address.empty() || cfg.metrics_bind_address == "0.0.0.0"
+                               ? INADDR_ANY
+                               : inet_addr(cfg.metrics_bind_address.c_str());
     addr.sin_port = htons(static_cast<uint16_t>(cfg.metrics_port));
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         LOG_WARN("[METRICS] Cannot bind metrics port " + std::to_string(cfg.metrics_port));
@@ -1116,15 +1199,20 @@ static void start_metrics_server(const Config& cfg)
         return;
     }
     listen(fd, 16);
-    LOG_INFO("[METRICS] Prometheus metrics on :" + std::to_string(cfg.metrics_port) + "/metrics");
+    LOG_INFO("[METRICS] Prometheus metrics on " + cfg.metrics_bind_address + ":" +
+             std::to_string(cfg.metrics_port) + "/metrics");
     std::thread([fd]() { metrics_accept_loop(fd); }).detach();
 }
 
 // ── admin server ──────────────────────────────────────────────────────────────
 // Plain TCP, 127.0.0.1 only. Commands: STATS, LIST_USERS, KICK, RELOAD.
 
-static void handle_admin_client(int fd)
+static void handle_admin_client(int fd, const std::string& required_token)
 {
+    // Enforce a 30-second read timeout so a slow/idle client cannot hold a thread forever.
+    struct timeval tv = {30, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     auto send_line_raw = [fd](const std::string& s) {
         std::string msg = s + "\n";
         ::send(fd, msg.data(), msg.size(), 0);
@@ -1142,6 +1230,24 @@ static void handle_admin_client(int fd)
         return line;
     };
 
+    // If admin_token is set, require the first line to be "AUTH <token>".
+    if (!required_token.empty()) {
+        std::string auth_line = read_line_raw();
+        std::istringstream auth_ss(auth_line);
+        std::string auth_cmd, provided;
+        auth_ss >> auth_cmd >> provided;
+        bool ok = auth_cmd == "AUTH" && provided.size() == required_token.size() &&
+                  ct_equal(reinterpret_cast<const uint8_t*>(provided.data()),
+                           reinterpret_cast<const uint8_t*>(required_token.data()),
+                           required_token.size());
+        if (!ok) {
+            send_line_raw("ERR unauthorized");
+            close(fd);
+            return;
+        }
+        send_line_raw("OK");
+    }
+
     while (true) {
         std::string line = read_line_raw();
         if (line.empty())
@@ -1154,7 +1260,7 @@ static void handle_admin_client(int fd)
         if (cmd == "STATS") {
             std::lock_guard<std::mutex> lock(store_mutex);
             Store& s = get_store();
-            int64_t uptime = now_unix() - g_start_time;
+            int64_t uptime = now_unix() - g_start_time.load();
             send_line_raw("OK users=" + std::to_string(s.user_count()) +
                           " sessions=" + std::to_string(s.session_count()) +
                           " messages=" + std::to_string(s.total_messages()) +
@@ -1197,13 +1303,24 @@ static void handle_admin_client(int fd)
     close(fd);
 }
 
-static void admin_thread(int admin_fd)
+static std::atomic<int> g_admin_active{0};
+static constexpr int ADMIN_MAX_CONN = 32;
+
+static void admin_thread(int admin_fd, std::string token)
 {
     while (true) {
         int cfd = accept(admin_fd, nullptr, nullptr);
         if (cfd < 0)
             continue;
-        std::thread([cfd]() { handle_admin_client(cfd); }).detach();
+        if (g_admin_active.fetch_add(1) >= ADMIN_MAX_CONN) {
+            g_admin_active.fetch_sub(1);
+            close(cfd);
+            continue;
+        }
+        std::thread([cfd, token]() {
+            handle_admin_client(cfd, token);
+            g_admin_active.fetch_sub(1);
+        }).detach();
     }
 }
 
@@ -1228,7 +1345,7 @@ static void start_admin_server(const Config& cfg)
     }
     listen(fd, 16);
     LOG_INFO("[ADMIN] Admin port listening on 127.0.0.1:" + std::to_string(cfg.admin_port));
-    std::thread([fd]() { admin_thread(fd); }).detach();
+    std::thread([fd, cfg]() { admin_thread(fd, cfg.admin_token); }).detach();
 }
 
 // ── plain TCP server (tests) ──────────────────────────────────────────────────
@@ -1272,6 +1389,7 @@ void start_server(int port)
                     return line;
                 },
                 cfg);
+            close(cfd);
         }).detach();
     }
 }
@@ -1363,7 +1481,7 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
 {
     Config cfg = cfg_init;
     log_init(cfg);
-    g_start_time = now_unix();
+    g_start_time.store(now_unix());
     g_config_path = config_path;
 
     {
@@ -1475,8 +1593,11 @@ void start_server_tls(const Config& cfg_init, const std::string& config_path)
                 ~Guard()
                 {
                     g_active_connections.fetch_sub(1);
-                    std::lock_guard<std::mutex> lk(g_fds_mutex);
-                    g_active_fds.erase(fd);
+                    {
+                        std::lock_guard<std::mutex> lk(g_fds_mutex);
+                        g_active_fds.erase(fd);
+                    }
+                    close(fd); // close AFTER removing from tracking set
                 }
             } guard{cfd};
             auto rng_ptr = std::make_shared<Botan::AutoSeeded_RNG>();
