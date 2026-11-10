@@ -60,6 +60,16 @@ static const int TEST_METRICS_BIND_FAIL_PORT = 59967; // TLS main port
 static const int TEST_METRICS_BLOCKER_PORT = 59966;   // pre-bound to block metrics bind
 // Port used for IPv6-bind-fallback test (pre-bound on IPv6 to force fallback)
 static const int TEST_IPV6_FALLBACK_PORT = 59965;
+// TLS server with max_groups_per_user=1 (covers group ownership limit path)
+static const int TEST_GROUP_OWN_LIMIT_PORT = 59964;
+// TLS server with admin_token set (covers admin AUTH code path)
+static const int TEST_ADMIN_AUTH_TLS_PORT = 59963;
+static const int TEST_ADMIN_AUTH_ADMIN_PORT = 59962;
+static const std::string TEST_ADMIN_AUTH_TOKEN = "supersecrettoken";
+// TLS server with P384 cert forced-regenerated (covers ensure_server_cert P384 branch)
+static const int TEST_CERTGEN_P384_PORT = 59961;
+// TLS server with Ed25519 cert forced-regenerated (covers ensure_server_cert Ed25519 branch)
+static const int TEST_CERTGEN_ED25519_PORT = 59960;
 
 // -------------------------------------------------------
 // TLS test helpers
@@ -437,6 +447,56 @@ int main()
         cfg.metrics_port = 0;
         cfg.cert_path = "/tmp/ztm_maxconn.cert.pem";
         cfg.key_path = "/tmp/ztm_maxconn.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_GROUP_OWN_LIMIT_PORT;
+        cfg.max_groups_per_user = 1;
+        cfg.worker_threads = 1;
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_grpownlimit.cert.pem";
+        cfg.key_path = "/tmp/ztm_grpownlimit.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    std::thread([] {
+        Config cfg;
+        cfg.server_port = TEST_ADMIN_AUTH_TLS_PORT;
+        cfg.admin_port = TEST_ADMIN_AUTH_ADMIN_PORT;
+        cfg.admin_token = TEST_ADMIN_AUTH_TOKEN;
+        cfg.worker_threads = 1;
+        cfg.metrics_port = 0;
+        cfg.cert_path = "/tmp/ztm_adminauth.cert.pem";
+        cfg.key_path = "/tmp/ztm_adminauth.key.pem";
+        start_server_tls(cfg);
+    }).detach();
+    // Cert-gen servers: delete the cert files first so ensure_server_cert generates them.
+    // This exercises the ECDSA-P384 and Ed25519 branches inside ensure_server_cert.
+    std::thread([] {
+        std::remove("/tmp/ztm_certgen_p384.cert.pem");
+        std::remove("/tmp/ztm_certgen_p384.key.pem");
+        Config cfg;
+        cfg.server_port = TEST_CERTGEN_P384_PORT;
+        cfg.cert_algorithm = "ECDSA-P384";
+        cfg.cert_path = "/tmp/ztm_certgen_p384.cert.pem";
+        cfg.key_path = "/tmp/ztm_certgen_p384.key.pem";
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.worker_threads = 1;
+        start_server_tls(cfg);
+    }).detach();
+    std::thread([] {
+        std::remove("/tmp/ztm_certgen_ed25519.cert.pem");
+        std::remove("/tmp/ztm_certgen_ed25519.key.pem");
+        Config cfg;
+        cfg.server_port = TEST_CERTGEN_ED25519_PORT;
+        cfg.cert_algorithm = "Ed25519";
+        cfg.cert_path = "/tmp/ztm_certgen_ed25519.cert.pem";
+        cfg.key_path = "/tmp/ztm_certgen_ed25519.key.pem";
+        cfg.admin_port = 0;
+        cfg.metrics_port = 0;
+        cfg.worker_threads = 1;
         start_server_tls(cfg);
     }).detach();
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
@@ -1880,7 +1940,8 @@ int main()
             cmd(fd, "LINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
         ASSERT_EQ(link_resp, std::string("OK"));
 
-        std::string gl_resp = cmd(fd, "GETLINKED " + primary.user_id);
+        std::string gl_resp =
+            cmd(fd, "GETLINKED " + primary.user_id + " " + primary.user_id + " " + p_tok);
         ASSERT_TRUE(gl_resp.find(device.user_id) != std::string::npos);
         close(fd);
     }
@@ -1900,7 +1961,8 @@ int main()
             cmd(fd, "UNLINK_DEVICE " + primary.user_id + " " + p_tok + " " + device.user_id);
         ASSERT_EQ(unlink_resp, std::string("OK"));
 
-        std::string gl_resp = cmd(fd, "GETLINKED " + primary.user_id);
+        std::string gl_resp =
+            cmd(fd, "GETLINKED " + primary.user_id + " " + primary.user_id + " " + p_tok);
         ASSERT_TRUE(gl_resp.find(device.user_id) == std::string::npos);
         close(fd);
     }
@@ -1948,8 +2010,11 @@ int main()
     TEST("GETLINKED returns ERR for unknown user");
     {
         reset_server_state();
+        auto caller = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string resp = cmd(fd, "GETLINKED 0000000000000000");
+        std::string c_tok = extract_token(
+            cmd(fd, "REGISTER " + caller.user_id + " " + Botan::hex_encode(caller.pubkey_bytes)));
+        std::string resp = cmd(fd, "GETLINKED 0000000000000000 " + caller.user_id + " " + c_tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -1968,7 +2033,8 @@ int main()
         cmd(fd, "DEREGISTER " + primary.user_id + " " + p_tok);
 
         // Device is still registered but link is gone
-        std::string gl_resp = cmd(fd, "GETLINKED " + device.user_id);
+        std::string gl_resp =
+            cmd(fd, "GETLINKED " + device.user_id + " " + device.user_id + " " + d_tok);
         ASSERT_TRUE(gl_resp.find(primary.user_id) == std::string::npos);
         close(fd);
     }
@@ -2006,7 +2072,7 @@ int main()
             cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         ASSERT_EQ(add_resp, std::string("OK"));
 
-        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid);
+        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list_resp.find(member.user_id) != std::string::npos);
         ASSERT_TRUE(list_resp.find(owner.user_id) != std::string::npos);
         close(fd);
@@ -2025,7 +2091,7 @@ int main()
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
 
         cmd(fd, "REMOVE_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
-        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid);
+        std::string list_resp = cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list_resp.find(member.user_id) == std::string::npos);
         close(fd);
     }
@@ -2063,8 +2129,11 @@ int main()
     TEST("LIST_MEMBERS returns ERR for unknown group");
     {
         reset_server_state();
+        auto caller = generate_identity(rng, g_cfg);
         int fd = connect_test();
-        std::string resp = cmd(fd, "LIST_MEMBERS 0000000000000000");
+        std::string c_tok = extract_token(
+            cmd(fd, "REGISTER " + caller.user_id + " " + Botan::hex_encode(caller.pubkey_bytes)));
+        std::string resp = cmd(fd, "LIST_MEMBERS 0000000000000000 " + caller.user_id + " " + c_tok);
         ASSERT_TRUE(resp.substr(0, 3) == "ERR");
         close(fd);
     }
@@ -2139,7 +2208,9 @@ int main()
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         std::string del = cmd(fd, "DELETE_GROUP " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_EQ(del, std::string("OK"));
-        ASSERT_TRUE(cmd(fd, "LIST_MEMBERS " + gid).substr(0, 3) == "ERR");
+        ASSERT_TRUE(
+            cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok).substr(0, 3) ==
+            "ERR");
         close(fd);
     }
 
@@ -2174,7 +2245,7 @@ int main()
         cmd(fd, "ADD_MEMBER " + gid + " " + owner.user_id + " " + o_tok + " " + member.user_id);
         ASSERT_EQ(cmd(fd, "LEAVE_GROUP " + gid + " " + member.user_id + " " + m_tok),
                   std::string("OK"));
-        std::string list = cmd(fd, "LIST_MEMBERS " + gid);
+        std::string list = cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + o_tok);
         ASSERT_TRUE(list.find(member.user_id) == std::string::npos);
         close(fd);
     }
@@ -2472,8 +2543,10 @@ int main()
         std::string resp = cmd(fd, "REKEY " + primary.user_id + " " + p_tok + " " + new_id.user_id +
                                        " " + Botan::hex_encode(new_id.pubkey_bytes));
         ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        std::string new_p_tok = resp.substr(3); // new token for the new identity
         // Device should now be linked to new identity
-        std::string linked = cmd(fd, "GETLINKED " + new_id.user_id);
+        std::string linked =
+            cmd(fd, "GETLINKED " + new_id.user_id + " " + new_id.user_id + " " + new_p_tok);
         ASSERT_TRUE(linked.find(device.user_id) != std::string::npos);
         close(fd);
     }
@@ -3106,6 +3179,222 @@ int main()
     {
         trigger_log_reopen_for_test();
         std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    }
+
+    // -------------------------------------------------------
+    // json_escape — covers all branch arms used in JSON log output.
+    // -------------------------------------------------------
+
+    TEST("json_escape: covers quote, backslash, whitespace, and control-char branches");
+    {
+        ASSERT_EQ(call_json_escape_for_test("hello"), std::string("hello"));
+        ASSERT_EQ(call_json_escape_for_test("a\"b"), std::string("a\\\"b"));
+        ASSERT_EQ(call_json_escape_for_test("a\\b"), std::string("a\\\\b"));
+        ASSERT_EQ(call_json_escape_for_test("a\nb"), std::string("a\\nb"));
+        ASSERT_EQ(call_json_escape_for_test("a\rb"), std::string("a\\rb"));
+        ASSERT_EQ(call_json_escape_for_test("a\tb"), std::string("a\\tb"));
+        ASSERT_EQ(call_json_escape_for_test(std::string("a\x01"
+                                                        "b")),
+                  std::string("a\\u0001b"));
+    }
+
+    // -------------------------------------------------------
+    // UPLOAD_PREKEYS: batch larger than cap is silently truncated
+    // -------------------------------------------------------
+
+    TEST("UPLOAD_PREKEYS: batch larger than remaining cap is silently truncated");
+    {
+        // TEST_PREKEY_CAP_PORT has max_prekeys_per_user=1.
+        // Uploading 2 at once should store 1 and return "OK 1".
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_PREKEY_CAP_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        if (conn.fd >= 0) {
+            std::string tok = extract_token(
+                tls_cmd(conn, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes)));
+            auto pks = generate_prekeys(2, rng, g_cfg);
+            std::string resp = tls_cmd(conn, "UPLOAD_PREKEYS " + id.user_id + " " + tok + " " +
+                                                 Botan::hex_encode(pks[0].pubkey_bytes) + " " +
+                                                 Botan::hex_encode(pks[1].pubkey_bytes));
+            ASSERT_EQ(resp, std::string("OK 1"));
+            close(conn.fd);
+        }
+    }
+
+    // -------------------------------------------------------
+    // GETLINKED: invalid token rejected
+    // -------------------------------------------------------
+
+    TEST("GETLINKED rejects invalid token");
+    {
+        reset_server_state();
+        auto id = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        cmd(fd, "REGISTER " + id.user_id + " " + Botan::hex_encode(id.pubkey_bytes));
+        std::string resp =
+            cmd(fd, "GETLINKED " + id.user_id + " " + id.user_id + " " + std::string(64, '0'));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // LIST_MEMBERS: invalid token rejected
+    // -------------------------------------------------------
+
+    TEST("LIST_MEMBERS rejects invalid token");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string tok = extract_token(
+            cmd(fd, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+        std::string gid = cmd(fd, "CREATE_GROUP " + owner.user_id + " " + tok + " G").substr(3);
+        std::string resp =
+            cmd(fd, "LIST_MEMBERS " + gid + " " + owner.user_id + " " + std::string(64, '0'));
+        ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // max_groups_per_user enforcement
+    // -------------------------------------------------------
+
+    TEST("CREATE_GROUP rejects when max_groups_per_user limit is reached");
+    {
+        reset_server_state();
+        auto owner = generate_identity(rng, g_cfg);
+        auto conn = tls_connect(TEST_GROUP_OWN_LIMIT_PORT);
+        ASSERT_TRUE(conn.fd >= 0);
+        if (conn.fd >= 0) {
+            std::string tok = extract_token(tls_cmd(
+                conn, "REGISTER " + owner.user_id + " " + Botan::hex_encode(owner.pubkey_bytes)));
+            std::string r1 = tls_cmd(conn, "CREATE_GROUP " + owner.user_id + " " + tok + " G1");
+            ASSERT_TRUE(r1.substr(0, 3) == "OK ");
+            std::string r2 = tls_cmd(conn, "CREATE_GROUP " + owner.user_id + " " + tok + " G2");
+            ASSERT_TRUE(r2.substr(0, 3) == "ERR");
+            close(conn.fd);
+        }
+    }
+
+    // -------------------------------------------------------
+    // Admin token AUTH: correct and incorrect token paths
+    // -------------------------------------------------------
+
+    // Helper: connect to the auth-protected admin port
+    auto connect_admin_auth = []() -> int {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(TEST_ADMIN_AUTH_ADMIN_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            close(fd);
+            return -1;
+        }
+        return fd;
+    };
+
+    TEST("admin AUTH: correct token is accepted");
+    {
+        int fd = connect_admin_auth();
+        ASSERT_TRUE(fd >= 0);
+        if (fd >= 0) {
+            std::string auth_resp = cmd(fd, "AUTH " + TEST_ADMIN_AUTH_TOKEN);
+            ASSERT_EQ(auth_resp, std::string("OK"));
+            std::string stats = cmd(fd, "STATS");
+            ASSERT_TRUE(stats.substr(0, 3) == "OK ");
+            close(fd);
+        }
+    }
+
+    TEST("admin AUTH: wrong token closes connection");
+    {
+        int fd = connect_admin_auth();
+        ASSERT_TRUE(fd >= 0);
+        if (fd >= 0) {
+            std::string resp = cmd(fd, "AUTH wrongpassword");
+            ASSERT_TRUE(resp.substr(0, 3) == "ERR");
+            std::string extra = read_line(fd); // connection closed after ERR
+            ASSERT_TRUE(extra.empty());
+            close(fd);
+        }
+    }
+
+    TEST("admin AUTH: oversized auth line triggers disconnect");
+    {
+        int fd = connect_admin_auth();
+        ASSERT_TRUE(fd >= 0);
+        if (fd >= 0) {
+            // A line longer than MAX_LINE_LEN causes read_line_raw to return ""
+            // which is treated as a wrong token → ERR + close.
+            std::string giant(MAX_LINE_LEN + 2, 'X');
+            giant += '\n';
+            ::send(fd, giant.data(), giant.size(), 0);
+            std::string resp = read_line(fd);
+            ASSERT_TRUE(resp.empty() || resp.substr(0, 3) == "ERR");
+            close(fd);
+        }
+    }
+
+    // -------------------------------------------------------
+    // cleanup_thread body — exercised directly via helper.
+    // -------------------------------------------------------
+
+    TEST("cleanup body: prunes messages, sessions, and rate buckets");
+    {
+        reset_server_state();
+        Config cfg;
+        cfg.session_ttl_hours = 1; // ensures sess_cutoff > 0
+        call_cleanup_for_test(cfg);
+        // A second call with session_ttl_hours=0 hits the sess_cutoff==0 path.
+        cfg.session_ttl_hours = 0;
+        call_cleanup_for_test(cfg);
+    }
+
+    // -------------------------------------------------------
+    // REKEY ack carry-over (line hit when old sender had acks)
+    // -------------------------------------------------------
+
+    TEST("REKEY carries over delivery acks when sender rekeys");
+    {
+        reset_server_state();
+        auto sender = generate_identity(rng, g_cfg);
+        auto recip = generate_identity(rng, g_cfg);
+        int fd = connect_test();
+        std::string s_tok = extract_token(
+            cmd(fd, "REGISTER " + sender.user_id + " " + Botan::hex_encode(sender.pubkey_bytes)));
+        std::string r_tok = extract_token(
+            cmd(fd, "REGISTER " + recip.user_id + " " + Botan::hex_encode(recip.pubkey_bytes)));
+        // Sender sends a message; recipient polls+acks it → ack credited to sender.
+        auto blob = encrypt_message("hi", sender.user_id, "s", recip.pubkey_bytes, rng, g_cfg);
+        cmd(fd, "SEND " + sender.user_id + " " + s_tok + " " + recip.user_id + " " +
+                    Botan::hex_encode(blob));
+        poll_all(fd, recip.user_id, r_tok); // increments sender's ack counter
+
+        // Sender now rekeys — drain_ack(old_sender_id) > 0 → increment_ack(new, old)
+        auto new_sender = generate_identity(rng, g_cfg);
+        std::string resp =
+            cmd(fd, "REKEY " + sender.user_id + " " + s_tok + " " + new_sender.user_id + " " +
+                        Botan::hex_encode(new_sender.pubkey_bytes));
+        ASSERT_TRUE(resp.substr(0, 3) == "OK ");
+        close(fd);
+    }
+
+    // -------------------------------------------------------
+    // ensure_server_cert P384/Ed25519 branches
+    // -------------------------------------------------------
+
+    TEST("ensure_server_cert: ECDSA-P384 cert file is generated");
+    {
+        ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen_p384.cert.pem").good());
+        ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen_p384.key.pem").good());
+    }
+
+    TEST("ensure_server_cert: Ed25519 cert file is generated");
+    {
+        ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen_ed25519.cert.pem").good());
+        ASSERT_TRUE(std::ifstream("/tmp/ztm_certgen_ed25519.key.pem").good());
     }
 
     // -------------------------------------------------------

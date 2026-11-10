@@ -243,8 +243,12 @@ Config Config::load(const std::string& path)
                     cfg.db_path = val;
                 else if (key == "admin_port")
                     cfg.admin_port = parse_int(val, key);
+                else if (key == "admin_token")
+                    cfg.admin_token = val;
                 else if (key == "metrics_port")
                     cfg.metrics_port = parse_int(val, key);
+                else if (key == "metrics_bind_address")
+                    cfg.metrics_bind_address = val;
                 else if (key == "max_prekeys_per_user")
                     cfg.max_prekeys_per_user = parse_int(val, key);
                 else if (key == "prekey_batch_size")

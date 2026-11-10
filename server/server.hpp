@@ -26,3 +26,7 @@ void call_handle_signal_for_test(int sig);
 // Set reload/log-reopen flags directly — accept loop processes them within 1 s.
 void trigger_reload_for_test();
 void trigger_log_reopen_for_test();
+// Exercises the json_escape helper used in JSON log output.
+std::string call_json_escape_for_test(const std::string& s);
+// Directly exercises the cleanup_thread body (pruning logic) without sleeping.
+void call_cleanup_for_test(const Config& cfg);
