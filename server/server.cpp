@@ -1678,6 +1678,25 @@ void prune_sessions_for_test()
 
 void call_log_init_for_test(const Config& cfg) { log_init(cfg); }
 
+std::string call_json_escape_for_test(const std::string& s) { return json_escape(s); }
+
+void call_cleanup_for_test(const Config& cfg)
+{
+    int64_t now = now_unix();
+    int64_t msg_cutoff = now - int64_t(cfg.msg_ttl_hours) * 3600;
+    int64_t sess_cutoff =
+        (cfg.session_ttl_hours > 0) ? now - int64_t(cfg.session_ttl_hours) * 3600 : 0;
+    int64_t bucket_cutoff = now - int64_t(cfg.rate_limit_window_s) * 2;
+    int64_t stale_cutoff = now - int64_t(cfg.cleanup_interval_min) * 2 * 60;
+    std::lock_guard<std::mutex> lock(store_mutex);
+    Store& s = get_store();
+    s.requeue_stale(stale_cutoff);
+    s.prune_messages(msg_cutoff);
+    if (sess_cutoff > 0)
+        s.prune_sessions(sess_cutoff);
+    s.prune_rate_buckets(bucket_cutoff);
+}
+
 void set_config_path_for_test(const std::string& path) { g_config_path = path; }
 
 void call_handle_signal_for_test(int sig) { handle_signal(sig); }
